@@ -1,6 +1,6 @@
 //! The app icon, everywhere Windows, macOS and Linux show one (#248).
 //!
-//! - **Executable:** `build.rs` embeds `assets/app-icon/photocraft.ico` (16–256 px) as icon
+//! - **Executable:** `build.rs` embeds `assets/yorusphoto/yorusphoto.ico` (16–256 px) as icon
 //!   resource 1, which Explorer, Alt+Tab and an unpinned taskbar button fall back to.
 //! - **Window:** [`window_icon`] sets the title-bar and taskbar icon at runtime (`WM_SETICON` on
 //!   Windows, `_NET_WM_ICON` on X11, the Dock when running unbundled on macOS).
@@ -14,8 +14,7 @@
 //! ID would need a Win32 call (`unsafe`, which the workspace forbids) and would then also have to
 //! be stamped on the shortcut, or the taskbar would stop matching the two.
 
-/// Window, taskbar and (when running unbundled) Dock icon. macOS gets the padded 1024 px render
-/// on Apple's icon grid; elsewhere the tighter 256 px hicolor render reads better at small sizes.
+/// Window, taskbar and (when running unbundled) Dock icon using the supplied yorusphoto logo.
 pub fn window_icon() -> egui::IconData {
     match eframe::icon_data::from_png_bytes(PNG) {
         Ok(icon) => icon,
@@ -26,16 +25,13 @@ pub fn window_icon() -> egui::IconData {
     }
 }
 
-#[cfg(target_os = "macos")]
-const PNG: &[u8] = include_bytes!("../../../assets/app-icon/photocraft-1024.png");
-#[cfg(not(target_os = "macos"))]
-const PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.photocraft.png");
+const PNG: &[u8] = include_bytes!("../../../assets/yorusphoto/icon-256.png");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ICO: &[u8] = include_bytes!("../../../assets/app-icon/photocraft.ico");
+    const ICO: &[u8] = include_bytes!("../../../assets/yorusphoto/yorusphoto.ico");
     const WXS: &str = include_str!("../../../packaging/windows/photocraft.wxs");
 
     fn u16_at(b: &[u8], i: usize) -> usize {
@@ -77,7 +73,7 @@ mod tests {
             sizes.push(w);
         }
         for want in [16, 24, 32, 48, 64, 256] {
-            assert!(sizes.contains(&want), "photocraft.ico lacks {want}px (has {sizes:?})");
+            assert!(sizes.contains(&want), "yorusphoto.ico lacks {want}px (has {sizes:?})");
         }
     }
 

@@ -106,7 +106,7 @@ struct Bench {
 
 impl Bench {
     fn wanted(&self, name: &str) -> bool {
-        self.only.as_ref().is_none_or(|o| name.contains(o.as_str()))
+        self.only.as_ref().is_none_or(|options| options.split('|').any(|option| name.contains(option)))
     }
 
     /// The canvas refresh after an edit (`canvas::ensure_gpu`): the damage rect grown by the
@@ -235,6 +235,7 @@ fn canvas() -> Option<(GpuCanvas, RenderState)> {
 }
 
 /// Sizes per mode.
+#[derive(Clone, Copy)]
 struct Sizes {
     /// The layered document of #209 (20 MP).
     layered: (u32, u32),
@@ -334,7 +335,16 @@ fn many_layers_doc(w: u32, h: u32, n: usize) -> Res<(Session, u64)> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let quick = args.iter().any(|a| a == "--quick");
-    let sz = if quick { &QUICK } else { &FULL };
+    let mut sz = if quick { QUICK } else { FULL };
+    match arg(&args, "--megapixels").as_deref() {
+        Some("24") => sz.layered = (6000, 4000),
+        Some("36") => sz.layered = (7200, 5000),
+        None => {}
+        Some(_) => {
+            eprintln!("--megapixels must be 24 or 36 (overrides only the layered scenario dimensions)");
+            std::process::exit(2);
+        }
+    }
     let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(if quick { 7 } else { 15 }).max(1);
     let gpu = if args.iter().any(|a| a == "--cpu") { None } else { canvas() };
     let no_reuse = args.iter().any(|a| a == "--no-composite-reuse");
@@ -385,7 +395,7 @@ fn main() {
                 canvas.set_composite_cache_budget(0);
             }
         }
-        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut b, sz))) {
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut b, &sz))) {
             let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "panic".into());
             let msg = format!("panicked: {}", msg.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join(" / "));
             let row = b.current.take().unwrap_or_else(|| group.to_string());
@@ -399,6 +409,7 @@ fn main() {
         let context = json!({
             "mode": if quick { "quick" } else { "full" },
             "reps": reps,
+            "layered_size": [sz.layered.0, sz.layered.1],
             "gpu_adapter": adapter,
             "composite_reuse": !no_reuse,
             "group": arg(&args, "--group"),

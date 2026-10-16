@@ -88,6 +88,10 @@ const FLUSH_WORK: u64 = 1 << 30;
 /// hundred layers reached that inside a single page cell (P12, "pc_compose_uniforms is
 /// invalid"), where the work and byte limits above never trigger.
 const FLUSH_OPS: u32 = 1000;
+/// Additional reusable effect scratch allowance, further limited to one sixteenth of the
+/// configured layer/cache budget. Required current-frame textures may exceed this allowance;
+/// obsolete idle sizes must not accumulate for 240 frames while resizing.
+const TEMP_CACHE_MAX: u64 = 128 << 20;
 
 /// A finished chunk: straight-alpha RGBA32F pixels of `rect` (document coordinates) at the
 /// texture's origin.
@@ -686,7 +690,8 @@ impl Compositor {
         self.resident_budget = bytes.saturating_sub(caches);
     }
 
-    /// The budget of layer pages, effect maps and lower-stack chunks (bytes).
+    /// The budget of layer pages, effect maps and lower-stack chunks (bytes), excluding the
+    /// additional scratch allowance and required transient frame resources.
     pub fn memory_budget(&self) -> u64 {
         self.resident_budget.saturating_add(self.fx_budget).saturating_add(self.prefix.budget())
     }
@@ -694,6 +699,11 @@ impl Compositor {
     /// Bytes held by reusable lower-stack chunks, within the overall cache allowance.
     pub fn composite_cache_bytes(&self) -> u64 {
         self.prefix.bytes()
+    }
+
+    /// VRAM held by reusable effect scratch textures, including the current frame's work.
+    pub fn temporary_bytes(&self) -> u64 {
+        self.temps.iter().map(|(t, _)| t.bytes() as u64).fold(0, u64::saturating_add)
     }
 
     /// Cap lower-stack reuse (default at most 512 MiB); zero disables it. The released allowance
@@ -818,6 +828,9 @@ impl Compositor {
         self.residents.retain(|_, r| r.doc != doc);
         self.fx.retain(|_, e| e.doc != doc);
         self.prefix.forget(doc);
+        // Scratch is shared rather than document-owned. Closing a large document should
+        // nevertheless release its last frame's potentially large working set immediately.
+        self.temps.clear();
     }
 
     /// GPU memory held by cached effect maps (bytes).
@@ -1003,8 +1016,29 @@ impl Compositor {
         self.residents.retain(|(id, _, _), r| r.doc != doc.id || r.last_used == frame || live.contains(id));
         self.fx.retain(|(id, _), e| e.doc != doc.id || e.last_used == frame || live.contains(id));
         stats.evicted += self.evict().0;
-        self.temps.retain(|(_, used)| frame.saturating_sub(*used) < 240);
+        self.trim_temps();
         Ok(stats)
+    }
+
+    /// Age out scratch textures and evict the least recently used idle sizes by bytes.
+    /// Never discard textures used in this frame, even if an effect itself exceeds the
+    /// reusable-cache allowance. wgpu retains submitted resources until their work completes.
+    fn trim_temps(&mut self) {
+        let frame = self.frame;
+        self.temps.retain(|(_, used)| frame.saturating_sub(*used) < 240);
+        let budget = (self.memory_budget() / 16).min(TEMP_CACHE_MAX);
+        let mut bytes = self.temporary_bytes();
+        if bytes <= budget {
+            return;
+        }
+        self.temps.sort_unstable_by_key(|(_, used)| *used);
+        self.temps.retain(|(texture, used)| {
+            if *used == frame || bytes <= budget {
+                return true;
+            }
+            bytes = bytes.saturating_sub(texture.bytes() as u64);
+            false
+        });
     }
 
     /// Keep resident pages within the resident budget and the effect cache within
@@ -2256,6 +2290,49 @@ pub fn render_to_vec_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_scratch_cache_bounds_idle_vram_and_keeps_active_work() {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("no GPU adapter for effect scratch cache test");
+            return;
+        };
+        let (device, _) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let mut comp = Compositor::try_new_with_format(&device, Compositor::preferred_acc_format(&adapter)).unwrap();
+        comp.set_memory_budget(64 << 20);
+        let mut previous_policy_bytes = 0u64;
+        for side in (128..=1024).step_by(16) {
+            comp.frame += 1;
+            let region = Rect::from_xywh(0, 0, side, side);
+            let view = comp.temp(&device, region, &[]);
+            let second = comp.temp(&device, region, std::slice::from_ref(&view));
+            assert_ne!(view, second, "simultaneously needed intermediates must not alias");
+            // Growing sizes cannot reuse the preceding smaller textures. The previous
+            // age-only policy kept every pair for all 57 frames (less than its 240-frame age).
+            previous_policy_bytes += u64::from(side) * u64::from(side) * 4 * 2;
+            comp.trim_temps();
+            let active = u64::from(side) * u64::from(side) * 4 * 2;
+            let allowance = comp.memory_budget() / 16;
+            assert!(comp.temporary_bytes() <= active.max(allowance));
+            assert!(comp.temps.iter().any(|(t, _)| t.view == view));
+            assert!(comp.temps.iter().any(|(t, _)| t.view == second));
+        }
+        let retained = comp.temporary_bytes();
+        assert!(retained * 10 < previous_policy_bytes, "growing windows must not retain a long history of obsolete sizes");
+        eprintln!("effect scratch growing-size fixture: previous {previous_policy_bytes} bytes, bounded {retained} bytes");
+        // With no active effects the remaining idle pool must respect its configured budget.
+        comp.frame += 1;
+        comp.trim_temps();
+        assert!(comp.temporary_bytes() <= comp.memory_budget() / 16);
+        comp.frame += 240;
+        comp.trim_temps();
+        assert_eq!(comp.temporary_bytes(), 0, "old scratch must still age out");
+        let _ = comp.temp(&device, Rect::new(0, 0, 256, 256), &[]);
+        assert!(comp.temporary_bytes() > 0);
+        comp.forget_doc(DocId(1));
+        assert_eq!(comp.temporary_bytes(), 0, "closing a document releases the shared scratch working set");
+    }
 
     #[test]
     fn half_roundtrip() {

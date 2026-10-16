@@ -13,10 +13,12 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod codex_history;
+
 #[cfg(test)]
 mod recovery_tests;
 
-/// Everything File › Open reads: PhotoCraft, Photoshop, OpenRaster and Affinity documents, flat images, and
+/// Everything File › Open reads: yorusphoto, Photoshop, OpenRaster and Affinity documents, flat images, and
 /// Photoshop brushes (.abr), gradients (.grd), swatches (.aco, .ase) and keyboard shortcut sets
 /// (.kys), which go to the preset libraries and Edit › Keyboard Shortcuts.
 const OPEN_EXTS: &[&str] = &[
@@ -37,11 +39,11 @@ fn open_filter_extensions(extensions: &[&str]) -> Vec<String> {
 }
 
 /// An explicit SVG filter keeps vector artwork discoverable even when a native picker defaults to
-/// the PhotoCraft-only filter. SVG is also included in All Formats for normal multi-format opens.
+/// the yorusphoto-only filter. SVG is also included in All Formats for normal multi-format opens.
 fn open_filters() -> Vec<(&'static str, Vec<String>)> {
     vec![
         ("All Formats", open_filter_extensions(OPEN_EXTS)),
-        ("PhotoCraft", open_filter_extensions(&["pcraft"])),
+        ("yorusphoto", open_filter_extensions(&["pcraft"])),
         ("OpenRaster", open_filter_extensions(&["ora"])),
         ("Krita", open_filter_extensions(&["kra"])),
         ("SVG", open_filter_extensions(SVG_EXTS)),
@@ -53,7 +55,7 @@ fn open_filters() -> Vec<(&'static str, Vec<String>)> {
 /// keeps defaulting to PSD.
 const SAVE_FILTERS: &[(&str, &[&str])] = &[
     ("PSD Document", &["psd", "psb"]),
-    ("PhotoCraft", &["pcraft"]),
+    ("yorusphoto", &["pcraft"]),
     ("OpenRaster", &["ora"]),
     ("PNG", &["png"]),
     ("JPEG", &["jpg"]),
@@ -171,7 +173,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
     }
 }
 
-/// Per-user settings directory: `PHOTOCRAFT_CONFIG_DIR`, else `<exe dir>/PhotoCraftData` in
+/// Per-user settings directory: `PHOTOCRAFT_CONFIG_DIR`, else `<exe dir>/yorusphotoData` in
 /// portable mode, else the platform convention. Everything the app persists lives under it; see
 /// [`crate::app_dirs`].
 pub fn config_dir() -> Option<PathBuf> {
@@ -368,13 +370,25 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         }) as photocraft_ui_egui::SaveFileFn
     });
     let step: fn(&str, &serde_json::Value) -> photocraft_engine::Result<()> = photocraft_automation::workspace::authorize_desktop_engine_step;
-    let automation_authorize = automation.is_some().then_some(step);
-    let automation_command = automation.map(|_| {
+    // Embedded Codex also dispatches automation when the editor was launched directly.
+    // No granted filesystem roots means file operations fail closed, not ambient access.
+    let automation_authorize = Some(step);
+    let automation_command = Some({
         Box::new(|id: &str, params: &serde_json::Value| {
             photocraft_automation::workspace::authorize_desktop_engine_command(id, params).map_err(|error| error.to_string())
         }) as photocraft_ui_egui::AutomationCommandFn
     });
     Services {
+        generate_image: Some(Box::new(crate::generation::start)),
+        codex_chat: Some(Box::new(crate::generation::chat)),
+        codex_login: Some(Box::new(crate::generation::sign_in)),
+        codex_workspace: Some(Box::new(crate::generation::workspace)),
+        codex_update: Some(Box::new(crate::codex_update::update)),
+        load_codex_state: Some(Box::new(codex_history::load)),
+        save_codex_state: Some(Box::new(codex_history::save)),
+        yorus_ai_generate: Some(Box::new(crate::yorus_direct::generate)),
+        yorus_ai_key_status: Some(Box::new(crate::yorus_direct::key_status)),
+        yorus_ai_save_key: Some(Box::new(crate::yorus_direct::save_key)),
         import: Some(Box::new(|name: &str, bytes: &[u8], max_svg_group_depth: usize| {
             crate::crash_guard::guard("Open", || {
                 photocraft_io::import_with_svg_group_depth(name, bytes, max_svg_group_depth).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())

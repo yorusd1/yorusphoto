@@ -1,0 +1,11 @@
+YorusAi Direct native integration
+
+The user supplied the local YorusAi-Photoshop-plugin-direct project and requested
+its features in this personal yorusphoto build. The native Rust integration
+implements its provider workflows; Photoshop UXP, JavaScript, fonts and webview
+runtime files are not bundled. The supplied project contained no license grant
+for public redistribution. No ownership or open-source license is asserted for
+that project's name or materials by this notice.
+
+Provider services, model names and trademarks belong to their respective owners.
+Provider API access is configured by the user and is separate from Codex sign-in.

@@ -707,7 +707,8 @@ impl Surface {
         let bpp = self.format.bytes_per_pixel();
         let moved = content.translate(dx, dy);
         let targets: std::collections::BTreeSet<TileCoord> = sources().flat_map(|(c, _)| c.rect().translate(dx, dy).intersect(&moved).tiles()).collect();
-        for dc in targets {
+        let targets: Vec<TileCoord> = targets.into_iter().collect();
+        let copy_tile = |dc: TileCoord| {
             let mut tile = Tile::filled(&self.format, &self.default_pixel);
             let dr = dc.rect();
             let sr = dr.translate(dx.saturating_neg(), dy.saturating_neg());
@@ -727,8 +728,18 @@ impl Surface {
                     }
                 }
             }
-            out.tiles.insert(dc, Arc::new(tile));
+            (dc, Arc::new(tile))
+        };
+        // A non-aligned Move preview copies its encoded pixels. Disjoint destination tiles
+        // can be copied independently; keep small surfaces and WebAssembly sequential.
+        // No pixel decoding, resampling, shared writes or extra image-sized buffer is needed.
+        #[cfg(not(target_arch = "wasm32"))]
+        if targets.len() >= 32 && targets.len().saturating_mul((TILE_SIZE * TILE_SIZE) as usize).saturating_mul(bpp) >= 8 << 20 {
+            use rayon::prelude::*;
+            out.tiles = targets.into_par_iter().with_min_len(4).map(copy_tile).collect();
+            return out;
         }
+        out.tiles = targets.into_iter().map(copy_tile).collect();
         out
     }
 
@@ -1216,6 +1227,37 @@ mod tests {
         let all = Rect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
         let _ = s.translated(i32::MAX, i32::MIN, all);
         let _ = s.translated(i32::MIN + 1, 3, all);
+    }
+
+    #[test]
+    fn translated_large_sparse_surface_keeps_encoded_pixels_defaults_and_copy_on_write() {
+        // More than 32 destination tiles exercises the native parallel path. Include holes,
+        // negative tile coordinates, nonzero defaults and several colour models and depths.
+        let region = Rect::new(-256, -256, 1792, 768);
+        for format in [
+            PixelFormat::RGBA8,
+            PixelFormat::RGBA16,
+            PixelFormat::RGBA32F,
+            PixelFormat::GRAY8,
+            PixelFormat { mode: ColorMode::Cmyk, sample: SampleType::U16, alpha: true },
+        ] {
+            let mut source = Surface::with_default(format, &vec![0.25; format.channels()]);
+            for coordinate in region.tiles() {
+                if (coordinate.tx, coordinate.ty) == (2, 1) || (coordinate.tx, coordinate.ty) == (5, 0) {
+                    continue;
+                }
+                let value = ((coordinate.tx + 3 * coordinate.ty).rem_euclid(13) + 1) as f32 / 16.0;
+                source.fill_rect(coordinate.rect(), &vec![value; format.channels()]);
+            }
+            let original = source.to_interleaved(region.inflate(2));
+            for (dx, dy) in [(7, 3), (-259, 257), (255, -1)] {
+                let mut moved = source.translated(dx, dy, region);
+                assert_eq!(moved.to_interleaved(region.inflate(2).translate(dx, dy)), original, "{format:?} ({dx}, {dy})");
+                assert_eq!(moved.default_pixel(), source.default_pixel());
+                moved.write_pixel(region.x0 + dx, region.y0 + dy, &vec![0.9; format.channels()]);
+                assert_eq!(source.to_interleaved(region.inflate(2)), original, "translated pixels must not mutate their source");
+            }
+        }
     }
 
     proptest! {

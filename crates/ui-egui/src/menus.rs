@@ -21,6 +21,16 @@ pub const TOP_MENUS: [&str; 10] = ["File", "Edit", "Image", "Layer", "Type", "Se
 
 /// UI-level commands (handled by the shell rather than the engine): id, label, menu, shortcut.
 pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+    ("window.codex", "Codex", &["Window"], None),
+    ("window.yorusai", "YorusAi Direct", &["Window"], None),
+    ("ai.generate", "Generate Image with Codex…", &["Filter", "AI"], None),
+    ("yorusai.open", "YorusAi tools…", &["Filter", "AI"], None),
+    ("yorusai.run", "Run YorusAi operation", &[], None),
+    ("yorusai.remix", "Generate YorusAi remix", &[], None),
+    ("yorusai.upscale", "Upscale with YorusAi", &[], None),
+    ("yorusai.layers", "Separate layers with YorusAi", &[], None),
+    ("yorusai.inspect", "Inspect YorusAi settings", &[], None),
+    ("yorusai.cancel", "Stop YorusAi operation", &[], None),
     ("ui.symmetryTransform", "Transform Symmetry", &[], None),
     // Right-click the options bar's tool icon (#2825); `tool.resetAll` asks first.
     ("tool.reset", "Reset Tool", &[], None),
@@ -91,13 +101,8 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("window.theme.breezeDark", "Breeze Dark Theme", &["Window", "Theme"], None),
     ("window.theme.system", "Sync with system", &["Window", "Theme"], None),
     ("edit.search", "Search…", &["Edit"], Some("Cmd+F")),
-    ("help.discord", "Join the ArtCraft Discord…", &["Help"], None),
-    ("help.website", "PhotoCraft Website", &["Help"], None),
-    ("help.artcraftWebsite", "ArtCraft Website", &["Help"], None),
-    ("help.github", "PhotoCraft on GitHub", &["Help"], None),
-    ("help.reportIssue", "Report an Issue…", &["Help"], None),
     ("help.systemInfo", "System Info…", &["Help"], None),
-    ("help.about", "About PhotoCraft", &["Help"], None),
+    ("help.about", "About yorusphoto", &["Help"], None),
 ];
 
 /// Window › <document>: the open documents, listed at the end of the Window menu as in Photoshop.
@@ -161,6 +166,12 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
 
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
 pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if let Some(result) = crate::yorus_ai_ui::handle(app, id, &params) {
+        return result;
+    }
+    if let Some(result) = crate::codex_ui::menu(app, id, &params) {
+        return result;
+    }
     if id == "ui.symmetryTransform" {
         return crate::symmetry_ui::begin(app).map(|_| Value::Null);
     }
@@ -178,10 +189,6 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
     }
     if let Some(result) = crate::panel_docking::command(app, id, &params) {
         return result;
-    }
-    // Help › Discord, website, GitHub, Report an Issue.
-    if let Some(url) = crate::links::url_for(id) {
-        return Ok(crate::links::open(app, ctx, url));
     }
     if id == "view.proofSetup.custom" {
         return Ok(json!({"dialog": crate::filter_dialog::open(app, "view.proofSetup")}));
@@ -694,11 +701,12 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     }
     match id {
         "window.panel.activate" | "window.panel.layout" => true,
+        "window.codex" | "window.yorusai" | "ai.generate" | "codex.send" => true,
+        i if i.starts_with("yorusai.") || i.starts_with("yorusAi.") => true,
         "window.panel.group" | "window.panel.move" | "window.panel.float" | "window.panel.dock" | "window.panel.close" => !app.session.prefs().workspace_locked,
         "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
         i if i.starts_with("file.openRecent.") => true,
         i if i.starts_with(DOCUMENT_ITEM) => true,
-        i if crate::links::url_for(i).is_some() => true,
         i if i.starts_with("window.theme.") => true,
         "file.save" | "file.saveAs" | "file.export.exportAs" | "file.export.quickExportAsPng" => {
             app.session.active().is_some() && app.services.export.is_some()
@@ -1023,13 +1031,6 @@ pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
         for (k, it) in recent.into_iter().enumerate() {
             items.insert(after + 1 + k, it);
         }
-    }
-    // Help: the link items, a separator, then System Info and About.
-    if let Some(at) = items.iter().position(|i| i.id == "help.systemInfo" || i.id == "help.about") {
-        items.insert(
-            at,
-            MenuItem { id: "---".into(), label: "---".into(), path: vec!["Help".into()], shortcut: None, enabled: false, checked: None, color: None },
-        );
     }
     // Window: the open documents in tab order, after a separator, the active one checked.
     if let Some(last) = items.iter().rposition(|i| i.path.first().map(String::as_str) == Some("Window")) {
@@ -1562,6 +1563,23 @@ mod tests {
     }
 
     #[test]
+    fn direct_ai_tools_have_unique_discoverable_shell_metadata() {
+        let app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let items = menu_items(&app);
+        for id in ["yorusai.run", "yorusai.remix", "yorusai.upscale", "yorusai.layers", "yorusai.inspect", "yorusai.cancel"] {
+            assert!(is_live(id), "{id}");
+            assert!(is_enabled(&app, id), "let the operation explain missing keys or selection: {id}");
+            let matching: Vec<_> = items.iter().filter(|item| item.id == id).collect();
+            assert_eq!(matching.len(), 1, "{id}");
+            let item = matching[0];
+            assert!(item.enabled);
+            assert!(item.path.is_empty(), "agent actions do not add duplicate menu entries");
+        }
+        let open = items.iter().find(|item| item.id == "yorusai.open").unwrap();
+        assert_eq!(open.path, ["Filter", "AI"]);
+    }
+
+    #[test]
     fn select_menu_contains_every_selection_context_action_and_more() {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
@@ -1790,7 +1808,7 @@ mod tests {
                 }
                 h.run_steps(3);
             };
-            let open = |h: &Harness<'_, PhotocraftApp>| h.query_by_label_contains("About PhotoCraft").is_some();
+            let open = |h: &Harness<'_, PhotocraftApp>| h.query_by_label_contains("About yorusphoto").is_some();
             let field_id = egui::Id::new("help-menu-search").with("field");
             let help = h.get_by_label("Help").rect().center();
             click(&mut h, help);

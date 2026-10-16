@@ -1,0 +1,8 @@
+The OpenAI Blossom logos are unmodified assets supplied by OpenAI at
+https://cdn.openai.com/brand/openai-logos.zip
+Source and usage guidelines: https://openai.com/brand/
+
+The OpenAI logo and OpenAI, ChatGPT and GPT marks belong to OpenAI.
+These marks identify the OpenAI-powered Codex panel only. They do not form
+yorusphoto's product identity or indicate OpenAI endorsement.
+No open-source license is asserted for these trademark assets.

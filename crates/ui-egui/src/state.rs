@@ -1027,6 +1027,12 @@ pub struct ColorPanelState {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
+    #[serde(default)]
+    pub codex: crate::codex_ui::State,
+    #[serde(default)]
+    pub ai_sidebar: crate::ai_sidebar::State,
+    #[serde(default)]
+    pub yorus_ai: crate::yorus_ai_ui::State,
     pub tool: Tool,
     /// The last tool used in each shortcut group (the tools sharing a key, [`Tool::key`]), at most
     /// one per group: the group's key brings it back, as in Photoshop (#2608).
@@ -1241,6 +1247,9 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            codex: Default::default(),
+            ai_sidebar: Default::default(),
+            yorus_ai: Default::default(),
             tool: Tool::Brush,
             group_tools: Vec::new(),
             recent_files: Vec::new(),

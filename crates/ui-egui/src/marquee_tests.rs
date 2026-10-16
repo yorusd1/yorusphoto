@@ -223,7 +223,7 @@ fn the_live_outline_snaps_to_pixels_and_matches_the_committed_selection() {
         press_at(&mut h, 10.3, 10.3, Modifiers::NONE);
         move_to(&mut h, 20.6, 15.4);
         let app = h.state();
-        let live = app.drag.as_ref().and_then(|d| crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom())).unwrap();
+        let live = app.drag.as_ref().and_then(|d| crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom(), [400, 300])).unwrap();
         assert_eq!(live, [10.0, 10.0, 21.0, 16.0], "{tool:?}: whole pixels while dragging");
         release_at(&mut h, 20.6, 15.4, Modifiers::NONE);
         assert_eq!(selection(&h), Rect::new(10, 10, 21, 16), "{tool:?}: the commit is what was shown");
@@ -246,7 +246,7 @@ fn the_live_outline_matches_the_committed_selection_in_a_rotated_view() {
         let (live, pts) = {
             let app = h.state();
             let d = app.drag.as_ref().expect("the drag is on");
-            let live = crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom()).expect("a marquee is dragged");
+            let live = crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom(), [400, 300]).expect("a marquee is dragged");
             // Exactly what the canvas paints for this drag.
             (live, crate::canvas::marquee_drag_ants(d, &xf, Some(live)))
         };
@@ -303,6 +303,272 @@ fn drag_to(h: &mut Harness<'static, PhotocraftApp>, from: [f32; 2], to: [f32; 2]
     }
 }
 
+fn live_selection(h: &Harness<'static, PhotocraftApp>) -> Option<[f64; 4]> {
+    let app = h.state();
+    app.drag.as_ref().and_then(|d| crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom(), [400, 300]))
+}
+
+#[test]
+fn outside_marquee_presses_project_to_the_nearest_canvas_edge_or_corner() {
+    let cases = [
+        ([-50.0, -80.0], [0.0, 0.0], [120.0, 80.0], Rect::new(0, 0, 120, 80)),
+        ([180.0, -80.0], [180.0, 0.0], [240.0, 80.0], Rect::new(180, 0, 240, 80)),
+        ([450.0, -80.0], [400.0, 0.0], [280.0, 80.0], Rect::new(280, 0, 400, 80)),
+        ([450.0, 120.0], [400.0, 120.0], [280.0, 200.0], Rect::new(280, 120, 400, 200)),
+        ([450.0, 380.0], [400.0, 300.0], [280.0, 220.0], Rect::new(280, 220, 400, 300)),
+        ([180.0, 380.0], [180.0, 300.0], [240.0, 220.0], Rect::new(180, 220, 240, 300)),
+        ([-50.0, 380.0], [0.0, 300.0], [120.0, 220.0], Rect::new(0, 220, 120, 300)),
+        ([-50.0, 120.0], [0.0, 120.0], [120.0, 200.0], Rect::new(0, 120, 120, 200)),
+    ];
+    for (from, anchor, to, want) in cases {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = false;
+        drag_to(&mut h, from, to);
+        assert_eq!(h.state().drag.as_ref().unwrap().start, anchor.map(f64::from), "press at {from:?}");
+        assert_eq!(live_selection(&h), Some([want.x0, want.y0, want.x1, want.y1].map(f64::from)));
+        release_at(&mut h, to[0], to[1], Modifiers::NONE);
+        assert_eq!(selection(&h), want, "press at {from:?}");
+    }
+}
+
+#[test]
+fn fixed_ratio_marquees_keep_their_shape_at_every_canvas_boundary() {
+    let cases = [
+        ([450.0, -80.0], [250.0, 160.0], [1.0, 1.0], Rect::new(240, 0, 400, 160)),
+        ([-50.0, -80.0], [120.0, 80.0], [1.0, 1.0], Rect::new(0, 0, 120, 120)),
+        ([450.0, 380.0], [280.0, 220.0], [1.0, 1.0], Rect::new(280, 180, 400, 300)),
+        ([-50.0, 380.0], [120.0, 220.0], [1.0, 1.0], Rect::new(0, 180, 120, 300)),
+        ([350.0, 220.0], [650.0, 500.0], [1.0, 1.0], Rect::new(350, 220, 400, 270)),
+        ([100.0, 80.0], [-60.0, -80.0], [1.0, 1.0], Rect::new(20, 0, 100, 80)),
+        ([50.0, 50.0], [450.0, 380.0], [2.0, 1.0], Rect::new(50, 50, 400, 225)),
+        ([350.0, 250.0], [-50.0, 40.0], [2.0, 1.0], Rect::new(0, 75, 350, 250)),
+        ([50.0, 50.0], [450.0, 380.0], [4.0, 5.0], Rect::new(50, 50, 250, 300)),
+    ];
+    for tool in [Tool::RectMarquee, Tool::EllipseMarquee] {
+        for (from, to, ratio, want) in cases {
+            let mut h = harness(tool);
+            h.state_mut().ui.extras.snap = false;
+            let o = &mut h.state_mut().ui.tool_options;
+            o.marquee_style = "fixedRatio".into();
+            [o.marquee_width, o.marquee_height] = ratio;
+            drag_to(&mut h, from, to);
+            let live = live_selection(&h).unwrap();
+            assert_eq!(live, [want.x0, want.y0, want.x1, want.y1].map(f64::from), "{tool:?}, {from:?} -> {to:?}, ratio {ratio:?}");
+            assert!(readout(&h, want.width() as i32, want.height() as i32));
+            release_at(&mut h, to[0], to[1], Modifiers::NONE);
+            assert_eq!(selection(&h), want, "{tool:?}: commit matches the bounded preview");
+        }
+    }
+}
+
+#[test]
+fn marquee_pointer_endpoints_stay_on_the_canvas_before_commit() {
+    for fixed_ratio in [false, true] {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = false;
+        if fixed_ratio {
+            h.state_mut().ui.tool_options.marquee_style = "fixedRatio".into();
+        }
+        drag_to(&mut h, [50.0, 50.0], [450.0, 380.0]);
+        let drag = h.state().drag.as_ref().unwrap();
+        assert_eq!(drag.points.last().map(|p| [p[0], p[1]]), Some([400.0, 300.0]));
+        let want = if fixed_ratio { Rect::new(50, 50, 300, 300) } else { Rect::new(50, 50, 400, 300) };
+        assert_eq!(live_selection(&h), Some([want.x0, want.y0, want.x1, want.y1].map(f64::from)));
+        release_at(&mut h, 450.0, 380.0, Modifiers::NONE);
+        assert_eq!(selection(&h), want);
+    }
+}
+
+#[test]
+fn shift_and_centered_marquees_preserve_constraints_when_the_canvas_limits_them() {
+    for (ratio, during, want) in [
+        (false, Modifiers::SHIFT, Rect::new(40, 80, 260, 300)),
+        (false, Modifiers::SHIFT | Modifiers::ALT, Rect::new(0, 40, 80, 120)),
+        (true, Modifiers::ALT, Rect::new(0, 60, 80, 100)),
+    ] {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = false;
+        if ratio {
+            let o = &mut h.state_mut().ui.tool_options;
+            o.marquee_style = "fixedRatio".into();
+            o.marquee_width = 2.0;
+            o.marquee_height = 1.0;
+        }
+        press_at(&mut h, 40.0, 80.0, Modifiers::NONE);
+        mods(&mut h, during);
+        move_to(&mut h, 450.0, 380.0);
+        assert_eq!(live_selection(&h), Some([want.x0, want.y0, want.x1, want.y1].map(f64::from)));
+        release_at(&mut h, 450.0, 380.0, during);
+        assert_eq!(selection(&h), want);
+    }
+}
+
+#[test]
+fn fractional_square_marquees_remain_square_at_pixel_precision() {
+    for (from, to, want) in [
+        ([10.9, 20.1], [60.3, 40.2], Rect::new(11, 20, 60, 69)),
+        ([10.9, 20.1], [60.4, 40.2], Rect::new(11, 20, 61, 70)),
+        ([350.2, 220.7], [450.0, 380.0], Rect::new(350, 221, 400, 271)),
+    ] {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = false;
+        h.state_mut().ui.tool_options.marquee_style = "fixedRatio".into();
+        drag_to(&mut h, from, to);
+        assert_eq!(live_selection(&h), Some([want.x0, want.y0, want.x1, want.y1].map(f64::from)));
+        release_at(&mut h, to[0], to[1], Modifiers::NONE);
+        assert_eq!(selection(&h), want);
+        assert_eq!(want.width(), want.height());
+    }
+}
+
+#[test]
+fn fixed_size_marquees_fit_proportionally_when_there_is_less_room_at_the_anchor() {
+    let mut h = harness(Tool::RectMarquee);
+    h.state_mut().ui.extras.snap = false;
+    let o = &mut h.state_mut().ui.tool_options;
+    o.marquee_style = "fixedSize".into();
+    o.marquee_width = 64.0;
+    o.marquee_height = 32.0;
+    drag_to(&mut h, [350.0, 250.0], [450.0, 380.0]);
+    assert_eq!(live_selection(&h), Some([350.0, 250.0, 400.0, 275.0]));
+    release_at(&mut h, 450.0, 380.0, Modifiers::NONE);
+    assert_eq!(selection(&h), Rect::new(350, 250, 400, 275));
+}
+
+#[test]
+fn bounded_marquee_projection_follows_rotated_flipped_and_nonsquare_pixel_views() {
+    for (rotation, flip, aspect) in [(30.0, false, "square"), (-20.0, true, "square"), (20.0, false, "custom:2:Wide")] {
+        let mut h = harness(Tool::RectMarquee);
+        let app = h.state_mut();
+        app.ui.extras.snap = false;
+        app.ui.tool_options.marquee_style = "fixedRatio".into();
+        app.ui.view.flip_horizontal = flip;
+        app.ui.view.pixel_aspect = aspect.into();
+        app.ui.views[0].rotation = rotation;
+        app.ui.views[0].zoom = 0.75;
+        h.run_steps(2);
+        drag_to(&mut h, [450.0, -80.0], [250.0, 160.0]);
+        let live = live_selection(&h).unwrap();
+        assert_eq!(h.state().drag.as_ref().unwrap().start, [400.0, 0.0]);
+        assert_eq!(live, [240.0, 0.0, 400.0, 160.0]);
+        release_at(&mut h, 250.0, 160.0, Modifiers::NONE);
+        assert_eq!(selection(&h), Rect::new(240, 0, 400, 160), "rotation {rotation}, flip {flip}, aspect {aspect}");
+    }
+}
+
+#[test]
+fn marquee_drag_that_stays_outside_the_same_corner_creates_no_selection() {
+    let mut h = harness(Tool::RectMarquee);
+    h.state_mut().ui.extras.snap = false;
+    h.state_mut().ui.tool_options.marquee_style = "fixedRatio".into();
+    drag_to(&mut h, [450.0, -80.0], [480.0, -40.0]);
+    assert_eq!(h.state().drag.as_ref().unwrap().start, [400.0, 0.0]);
+    assert!(live_selection(&h).is_none());
+    release_at(&mut h, 480.0, -40.0, Modifiers::NONE);
+    assert!(selection(&h).is_empty());
+}
+
+#[test]
+fn outside_presses_draw_a_new_marquee_even_when_the_old_selection_touches_the_edge() {
+    for snap in [false, true] {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = snap;
+        h.state_mut().ui.tool_options.marquee_style = "fixedRatio".into();
+        h.state_mut().run("select.all", json!({})).unwrap();
+        // Within the snap tolerance: snapping the press to (0, 0) must not change its intent
+        // into a drag of the existing selection outline.
+        drag_to(&mut h, [-5.0, -7.0], [120.0, 80.0]);
+        assert!(h.state().drag.as_ref().unwrap().sel_move.is_none());
+        assert_eq!(live_selection(&h), Some([0.0, 0.0, 120.0, 120.0]));
+        release_at(&mut h, 120.0, 80.0, Modifiers::NONE);
+        assert_eq!(selection(&h), Rect::new(0, 0, 120, 120));
+    }
+}
+
+#[test]
+fn space_preserves_the_realized_size_of_a_boundary_limited_marquee() {
+    for (style, start_y, dimensions, initial, moved) in [
+        ("fixedRatio", 220.0, [1.0, 1.0], [350.0, 220.0, 400.0, 270.0], [250.0, 120.0, 300.0, 170.0]),
+        ("fixedSize", 250.0, [64.0, 32.0], [350.0, 250.0, 400.0, 275.0], [250.0, 150.0, 300.0, 175.0]),
+    ] {
+        let mut h = harness(Tool::RectMarquee);
+        h.state_mut().ui.extras.snap = false;
+        let o = &mut h.state_mut().ui.tool_options;
+        o.marquee_style = style.into();
+        [o.marquee_width, o.marquee_height] = dimensions;
+        drag_to(&mut h, [350.0, start_y], [450.0, 380.0]);
+        assert_eq!(live_selection(&h), Some(initial));
+        let space = |h: &mut Harness<'static, PhotocraftApp>, pressed| {
+            h.event(egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
+            h.run_steps(2);
+        };
+        space(&mut h, true);
+        assert_eq!(live_selection(&h), Some(initial), "pressing Space must not jump the shape");
+        move_to(&mut h, 350.0, 280.0);
+        assert_eq!(live_selection(&h), Some(moved), "Space moves the visible size, including reduced Fixed Size");
+        move_to(&mut h, 350.0, 280.0);
+        assert_eq!(live_selection(&h), Some(moved), "a stationary pointer must not move or resize it again");
+        space(&mut h, false);
+        assert_eq!(live_selection(&h), Some(moved), "releasing Space must not jump the shape");
+        if style == "fixedRatio" {
+            move_to(&mut h, 360.0, 290.0);
+            assert_eq!(live_selection(&h), Some([250.0, 120.0, 310.0, 180.0]), "sizing resumes relative to the moved corner");
+            release_at(&mut h, 360.0, 290.0, Modifiers::NONE);
+            assert_eq!(selection(&h), Rect::new(250, 120, 310, 180));
+        } else {
+            release_at(&mut h, 350.0, 280.0, Modifiers::NONE);
+            assert_eq!(selection(&h), Rect::new(250, 150, 300, 175));
+        }
+    }
+}
+
+#[test]
+fn releasing_space_after_a_clamped_move_keeps_the_visible_marquee() {
+    for style in ["normal", "fixedRatio"] {
+        for (to, want) in [([-50.0, 150.0], [0.0, 50.0, 100.0, 150.0]), ([450.0, 380.0], [300.0, 200.0, 400.0, 300.0])] {
+            let mut h = harness(Tool::RectMarquee);
+            h.state_mut().ui.extras.snap = false;
+            h.state_mut().ui.tool_options.marquee_style = style.into();
+            drag_to(&mut h, [100.0, 100.0], [200.0, 200.0]);
+            let space = |h: &mut Harness<'static, PhotocraftApp>, pressed| {
+                h.event(egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
+                h.run_steps(2);
+            };
+            space(&mut h, true);
+            move_to(&mut h, to[0], to[1]);
+            assert_eq!(live_selection(&h), Some(want), "Space stops the shape at the boundary");
+            space(&mut h, false);
+            assert_eq!(live_selection(&h), Some(want), "a clipped Space move must rebase the pointer offset");
+            release_at(&mut h, to[0], to[1], Modifiers::NONE);
+            assert_eq!(selection(&h), Rect::new(want[0] as i32, want[1] as i32, want[2] as i32, want[3] as i32));
+        }
+    }
+}
+
+#[test]
+fn exactly_vertical_or_horizontal_fractional_marquees_still_select_one_pixel_lines() {
+    for (from, to, want) in [([10.2, 10.4], [10.2, 50.4], Rect::new(10, 10, 11, 51)), ([10.2, 10.4], [50.6, 10.4], Rect::new(10, 10, 51, 11))] {
+        let mut h = zoomed(Tool::RectMarquee);
+        drag_to(&mut h, from, to);
+        assert_eq!(live_selection(&h), Some([want.x0, want.y0, want.x1, want.y1].map(f64::from)));
+        release_at(&mut h, to[0], to[1], Modifiers::NONE);
+        assert_eq!(selection(&h), want);
+    }
+}
+
+#[test]
+fn bounded_marquee_preview_handles_empty_canvases_and_nonfinite_gestures() {
+    use crate::canvas::{Drag, marquee_preview_px};
+    let o = crate::state::ToolOptions::default();
+    for start in [[f64::NAN, 10.0], [10.0, f64::NAN]] {
+        let d = Drag::new(Tool::RectMarquee, start, vec![[80.0, 90.0, 1.0]], Modifiers::NONE, false);
+        assert!(marquee_preview_px(&o, &d, 1.0, [400, 300]).is_none());
+    }
+    let d = Drag::new(Tool::RectMarquee, [10.0, 10.0], vec![[80.0, 90.0, 1.0]], Modifiers::NONE, false);
+    assert!(marquee_preview_px(&o, &d, 1.0, [0, 300]).is_none());
+    assert!(marquee_preview_px(&o, &d, 1.0, [400, 0]).is_none());
+}
+
 /// #2391: a one-pixel column or row shown while dragging (ants and readout) is the selection the
 /// release keeps, also when the drag starts outside a selection it replaces (Photoshop). A click
 /// without a drag still deselects.
@@ -317,7 +583,7 @@ fn a_one_pixel_column_or_row_is_kept_on_release() {
                 }
                 drag_to(&mut h, [10.2, 10.4], end);
                 let app = h.state();
-                let live = app.drag.as_ref().and_then(|d| crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom()));
+                let live = app.drag.as_ref().and_then(|d| crate::canvas::marquee_preview_px(&app.ui.tool_options, d, app.point_zoom(), [400, 300]));
                 let shown = [want.x0, want.y0, want.x1, want.y1].map(f64::from);
                 assert_eq!(live, Some(shown), "{tool:?} {name} (existing {existing}): the outline while dragging");
                 assert!(readout(&h, want.width() as i32, want.height() as i32), "{tool:?} {name}: W/H readout");

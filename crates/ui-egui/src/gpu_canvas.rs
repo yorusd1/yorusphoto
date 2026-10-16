@@ -259,12 +259,18 @@ impl GpuCanvas {
         }
     }
 
-    /// GPU bytes the wgpu compositor holds: resident layer pages and caches (effect maps and
-    /// lower-stack chunks). Keep the scorecard's memory measurements inclusive of reuse.
+    /// GPU bytes the wgpu compositor holds: resident layer pages and caches (effect maps,
+    /// lower-stack chunks and effect scratch textures). Include reusable scratch in profiling
+    /// rather than hiding its VRAM cost.
     pub fn compositor_bytes(&self) -> Option<(u64, usize)> {
         let r = self.rs.renderer.read();
         let c = r.callback_resources.get::<Resources>()?.compositor.as_ref()?;
-        Some((c.resident_bytes(), c.fx_cache_bytes().saturating_add(usize::try_from(c.composite_cache_bytes()).unwrap_or(usize::MAX))))
+        Some((
+            c.resident_bytes(),
+            c.fx_cache_bytes()
+                .saturating_add(usize::try_from(c.composite_cache_bytes()).unwrap_or(usize::MAX))
+                .saturating_add(usize::try_from(c.temporary_bytes()).unwrap_or(usize::MAX)),
+        ))
     }
 
     /// Set the checkerboard and gamut warning colours.

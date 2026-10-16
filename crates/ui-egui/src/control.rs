@@ -374,7 +374,7 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
             }
             run_waiting(app, wait, |app| crate::menus::invoke(app, ctx, id, params))
         }
-        "engine.commands" => wrap(app.run("command.list", json!({}))),
+        "engine.commands" => wrap(command_list(app)),
         // Background jobs (#210): running ones with progress, then the last few that ended.
         "jobs.list" => wrap(app.session.execute("jobs.list", json!({})).map_err(|e| e.to_string())),
         "jobs.cancel" => {
@@ -1170,6 +1170,18 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
     }
 }
 
+/// Commands for the live editor, including native provider workflows.
+pub(crate) fn command_list(app: &mut PhotocraftApp) -> Result<Value, String> {
+    let mut result = app.run("command.list", json!({}))?;
+    let mut extra = crate::yorus_ai_ui::command_specs(app);
+    extra.extend(crate::codex_ui::command_specs(app));
+    let items = if result.is_array() { result.as_array_mut() } else { result.get_mut("commands").and_then(Value::as_array_mut) };
+    if let Some(items) = items {
+        items.extend(extra);
+    }
+    Ok(result)
+}
+
 /// Snapshot of everything on screen, addressable by id.
 pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
     let screen = ctx.content_rect();
@@ -1178,7 +1190,7 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
     if let Some((kind, fields)) = &app.ui.shell.dialog {
         dialogs.push(json!({"id": SHELL_DIALOG, "kind": kind, "title": crate::workspace_ui::title(kind), "fields": fields}));
     }
-    json!({
+    let mut snapshot = json!({
         "window": {"width": screen.width(), "height": screen.height(), "pixelsPerPoint": ctx.pixels_per_point()},
         "tool": app.ui.tool,
         "toolOptions": app.ui.tool_options,
@@ -1230,6 +1242,8 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         "theme": app.ui.theme,
         "status": app.ui.status,
         "statusError": app.ui.status_error,
+        "codex": app.ui.codex,
+        "codexBusy": app.codex_runtime.busy(),
         "notices": app.ui.notices,
         "gpuFallbackNotice": app.ui.gpu_fallback_notice,
         "kysOffer": app.ui.kys_offer,
@@ -1241,7 +1255,15 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         "distort": app.distort.describe(),
         "jobs": crate::jobs_ui::inspect(app),
         "cameraRaw": app.camera_raw.as_ref().map(|d| d.describe(&app.ui.camera_raw_scope, &app.ui.camera_raw_preview)),
-    })
+    });
+    if let Some(fields) = snapshot.as_object_mut() {
+        fields.insert("assistantSidebar".into(), json!(app.ui.ai_sidebar));
+        fields.insert("codexConnection".into(), app.codex_runtime.connection());
+        fields.insert("codexWorkspace".into(), crate::codex_ui::workspace_inspect(app));
+        fields.insert("yorusAi".into(), app.yorus_ai_runtime.inspect());
+        fields.insert("yorusAiSettings".into(), json!(app.ui.yorus_ai));
+    }
+    snapshot
 }
 
 pub fn save_screenshot(app: &mut PhotocraftApp, image: &egui::ColorImage, path: Option<&str>) -> Value {

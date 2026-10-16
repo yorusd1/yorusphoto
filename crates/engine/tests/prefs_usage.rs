@@ -44,12 +44,19 @@ fn has_ident(text: &str, prefix: &str, ident: &str) -> bool {
     })
 }
 
-/// Production source of a file: everything before its unit-test module.
+/// Production source of a file: everything before its inline unit-test module.
 fn production(text: &str) -> &str {
     // Windows checkouts may use CRLF; test-only reads must stay excluded.
+    // An external `mod helpers;` declaration has no body here: production code may follow it.
     let cut = ["#[cfg(test)]\nmod ", "#[cfg(test)]\r\nmod ", "#[cfg(test)]\npub mod ", "#[cfg(test)]\r\npub mod "]
         .into_iter()
-        .filter_map(|marker| text.find(marker))
+        .filter_map(|marker| {
+            text.match_indices(marker).find_map(|(offset, _)| {
+                let item = text.get(offset + marker.len()..)?;
+                let delimiter = item.find(['{', ';'])?;
+                (item.as_bytes().get(delimiter) == Some(&b'{')).then_some(offset)
+            })
+        })
         .min()
         .unwrap_or(text.len());
     &text[..cut]
@@ -190,5 +197,29 @@ fn production_excludes_test_modules_with_lf_or_crlf() {
 fn production_keeps_sources_without_a_test_module() {
     for source in ["", "fn a() {}\n", "// Préférences\r\nfn a() {}\r\n"] {
         assert_eq!(production(source), source);
+    }
+}
+
+#[test]
+fn production_keeps_reads_after_external_test_modules_and_excludes_inline_test_reads() {
+    for newline in ["\n", "\r\n"] {
+        for visibility in ["", "pub "] {
+            let prefix = format!(
+                "// Préférences{newline}#[cfg(test)]{newline}{visibility}mod helpers;{newline}\
+                 fn live() {{ let _ = p.tools.overscroll; }}{newline}\
+                 #[cfg(test)]{newline}{visibility}mod more_helpers;{newline}\
+                 fn also_live() {{ let _ = p.workspace.large_tabs; }}{newline}"
+            );
+            let source = format!("{prefix}#[cfg(test)]{newline}{visibility}mod tests {{ fn hidden() {{ let _ = p.type_.smart_quotes; }} }}{newline}");
+            assert_eq!(production(&source), prefix, "newline={newline:?}, visibility={visibility:?}");
+        }
+    }
+}
+
+#[test]
+fn production_keeps_the_whole_file_with_only_external_test_modules() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!("#[cfg(test)]{newline}mod helpers;{newline}fn live() {{ let _ = p.tools.overscroll; }}{newline}");
+        assert_eq!(production(&source), source);
     }
 }

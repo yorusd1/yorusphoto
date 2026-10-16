@@ -40,7 +40,7 @@ fn usage_and_unknown_command() {
     let (out, _) = ok(bin().arg("--help"));
     assert!(out.contains("convert"));
     let (out, _) = ok(bin().arg("--version"));
-    assert!(out.starts_with("photocraft-cli "));
+    assert!(out.starts_with("yorusphoto-cli "));
 }
 
 /// #423: `<subcommand> --help` and `-h` print usage and return at once (no inputs read, no files
@@ -53,7 +53,7 @@ fn every_subcommand_answers_help() {
             let o = bin().current_dir(&d).arg(sub).arg(help).arg("--out").arg("x.png").stdin(Stdio::null()).output().unwrap();
             let out = String::from_utf8_lossy(&o.stdout);
             assert_eq!(o.status.code(), Some(0), "{sub} {help}: {}", String::from_utf8_lossy(&o.stderr));
-            assert!(out.contains("USAGE") && out.contains("photocraft-cli batch"), "{sub} {help}: {out}");
+            assert!(out.contains("USAGE") && out.contains("yorusphoto-cli batch"), "{sub} {help}: {out}");
         }
     }
     assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "help wrote nothing");
@@ -572,7 +572,7 @@ fn mcp_stdio_handshake_and_tool_call() {
     send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}));
     let init = recv(1);
-    assert_eq!(init["result"]["serverInfo"]["name"], "photocraft", "{init}");
+    assert_eq!(init["result"]["serverInfo"]["name"], "yorusphoto", "{init}");
     send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
     let tools = recv(2);

@@ -1,0 +1,4 @@
+The yorusphoto branding image was supplied by the user for this application.
+Copyright and trademark rights remain with their respective owners.
+No open-source license is asserted for the supplied image or its resized encodings.
+These branding assets are separate from PhotoCraft's MIT OR Apache-2.0 source license.

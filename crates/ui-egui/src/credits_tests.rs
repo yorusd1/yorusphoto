@@ -212,9 +212,14 @@ fn about_window(tab: &str, table: bool) -> (f32, f32, f32) {
     h.state_mut().ui.open_dialog(crate::state::DialogKind::About, fields);
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("credits_view"), View { table, ..View::default() }));
     h.run_steps(6);
+    assert!(h.query_all_by_label("Discord").next().is_none(), "product information has no community promotion");
+    assert!(h.query_all_by_label("An image editor based on PhotoCraft.").next().is_none(), "the product headline uses Yorus identity");
+    if tab == "about" {
+        assert!(h.query_all_by_label("Create, edit, and generate images with Yorus.").next().is_some(), "the main tab describes the Yorus product");
+    }
     let ok = h.query_all_by_role(Role::Button).find(|n| n.accesskit_node().label().as_deref() == Some("OK")).map(|n| n.rect()).expect("the OK button");
     // The dialog's contents: everything between its title and the OK button.
-    let title = h.query_all_by_label("About PhotoCraft").map(|n| n.rect()).find(|r| r.top() < ok.top()).expect("the dialog title");
+    let title = h.query_all_by_label("About yorusphoto").map(|n| n.rect()).find(|r| r.top() < ok.top()).expect("the dialog title");
     let lowest = h
         .query_all(egui_kittest::kittest::by().predicate(|n| n.bounding_box().is_some()))
         .map(|n| n.rect())

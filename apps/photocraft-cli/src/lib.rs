@@ -1,4 +1,4 @@
-//! Headless Photocraft command line. `run` is the whole program, so it can be
+//! Headless yorusphoto command line. `run` is the whole program, so it can be
 //! tested in-process as well as through the binary.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -12,21 +12,21 @@ use photocraft_io::ExportOptions;
 use serde_json::{Value, json};
 
 pub const USAGE: &str = "\
-photocraft-cli: headless Photocraft
+yorusphoto-cli: headless yorusphoto
 
 USAGE:
-  photocraft-cli convert <in> <out> [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>]
+  yorusphoto-cli convert <in> <out> [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>]
       Convert between formats (.pcraft, .psd, .png, .jpg, .tif, .webp, .exr, …).
       TIFF output is flat unless --tiff-layers keeps the layers (Photoshop layer data).
       --quality sets the JPEG or WebP quality; a WebP written with a quality is lossy, without one lossless.
       --tga-bits sets a TGA's bits per pixel: 32 writes the alpha channel (or else the transparency) as
       its alpha, 24 none. Without it: 32 with an alpha channel or transparency, else 24.
-  photocraft-cli info <file> [--compact]
+  yorusphoto-cli info <file> [--compact]
       Print the document as JSON (size, mode, depth, layer tree).
-  photocraft-cli run (<file> | --new <json>) --cmd <id> [--params <json>] [--cmd …] [--out <file>] [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>]
+  yorusphoto-cli run (<file> | --new <json>) --cmd <id> [--params <json>] [--cmd …] [--out <file>] [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>]
       Open a file, run engine commands in order, save the result. Each --params
       applies to the preceding --cmd. Prints each command's JSON result.
-  photocraft-cli batch --actions <actions.json> [--action <name>] --in <dir> --out <dir> [--format <ext>] [--quality <1-100>] [--in-place] [--tiff-layers] [--tga-bits <24|32>]
+  yorusphoto-cli batch --actions <actions.json> [--action <name>] --in <dir> --out <dir> [--format <ext>] [--quality <1-100>] [--in-place] [--tiff-layers] [--tga-bits <24|32>]
       Apply an action list to every image in a directory. Steps are [id, params] pairs,
       {\"command\": id, \"params\": {…}} objects or bare ids, as a recorded action or droplet stores them
       (a list, or wrapped in {\"actions\": …}, {\"steps\": …} or a droplet). An Actions set (the Actions
@@ -34,21 +34,21 @@ USAGE:
       when the set holds more than one) with the whole set loaded, so its steps can play other actions
       of the set. An --out folder that is the --in folder is refused, as the results would replace
       the originals; --in-place allows it.
-  photocraft-cli droplet <file.pcdroplet> <file-or-dir>… [--out <dir>]
+  yorusphoto-cli droplet <file.pcdroplet> <file-or-dir>… [--out <dir>]
       Run a droplet (File › Automate › Create Droplet) on images and folders.
-  photocraft-cli commands [--json] [--filter <text>]
+  yorusphoto-cli commands [--json] [--filter <text>]
       List the engine command registry.
-  photocraft-cli mcp [--bridge <127.0.0.1:port>] [--control-token <64-hex> | --control-token-file <path>]
+  yorusphoto-cli mcp [--bridge <127.0.0.1:port>] [--control-token <64-hex> | --control-token-file <path>]
       [--automation-read-root <dir>] [--automation-write-root <dir>]
-      Run the MCP server on stdio (headless engine, or bridge to a running `photocraft --control <port>`).
-  photocraft-cli serve [--port <port>] [--control-token <64-hex> | --control-token-file <path>]
+      Run the MCP server on stdio (headless engine, or bridge to a running `yorusphoto --control <port>`).
+  yorusphoto-cli serve [--port <port>] [--control-token <64-hex> | --control-token-file <path>]
       [--automation-read-root <dir>] [--automation-write-root <dir>]
       Keep one headless session open and answer JSON lines ({\"id\",\"method\",\"params\"}) on stdio,
       or on 127.0.0.1:<port>. Methods: engine.execute, jobs.list/cancel, engine.commands,
       doc.open/new/place/save/exportLayers/exportDataSets/importDataSets/inspect/render/select/close, session.list, batch, methods
       (docs/control-protocol.md#headless-server).
 
-  photocraft-cli <subcommand> --help (or -h) prints this text. A flag the subcommand doesn't take is
+  yorusphoto-cli <subcommand> --help (or -h) prints this text. A flag the subcommand doesn't take is
   an error.
 ";
 
@@ -170,7 +170,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             return 0;
         }
         "--version" | "version" => {
-            let _ = writeln!(out, "photocraft-cli {}", photocraft_engine::build_info::long_version());
+            let _ = writeln!(out, "yorusphoto-cli {}", photocraft_engine::build_info::long_version());
             return 0;
         }
         _ => {}
@@ -525,12 +525,12 @@ fn serve(a: &Args, err: &mut dyn Write) -> R {
             let (supplied, token_file) = security::token_inputs(a.get("--control-token").map(str::to_owned), a.get("--control-token-file").map(PathBuf::from));
             let token = security::server_token(supplied.as_deref(), token_file.as_deref()).map_err(|e| e.to_string())?;
             if let Some(path) = &token_file {
-                let _ = writeln!(err, "photocraft-cli control token file: {}", path.display());
+                let _ = writeln!(err, "yorusphoto-cli control token file: {}", path.display());
             } else if supplied.is_none() {
-                let _ = writeln!(err, "photocraft-cli control token: {token}");
+                let _ = writeln!(err, "yorusphoto-cli control token: {token}");
             }
             photocraft_automation::rpc::serve_tcp(&addr, h, token, |local| {
-                let _ = writeln!(err, "photocraft-cli serving on {local}");
+                let _ = writeln!(err, "yorusphoto-cli serving on {local}");
             })
             .map_err(|e| e.to_string())
         }
@@ -569,7 +569,7 @@ mod missing_font_warning_tests {
     #[test]
     fn missing_typeface_is_reported_by_run_info_and_convert() {
         let family = "DefinitelyMissingPhotoCraftTypeface1251";
-        let folder = std::env::temp_dir().join(format!("photocraft-cli-font-warnings-{}", std::process::id()));
+        let folder = std::env::temp_dir().join(format!("yorusphoto-cli-font-warnings-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let native = folder.join("missing.pcraft");
         let png = folder.join("missing.png");
@@ -619,7 +619,7 @@ mod missing_font_warning_tests {
 
     #[test]
     fn convert_reads_and_writes_openraster() {
-        let folder = std::env::temp_dir().join(format!("photocraft-cli-ora-{}", std::process::id()));
+        let folder = std::env::temp_dir().join(format!("yorusphoto-cli-ora-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let path = |name: &str| folder.join(name).to_string_lossy().to_string();
         let (native, ora, png) = (path("layers.pcraft"), path("layers.ora"), path("back.png"));
@@ -639,7 +639,7 @@ mod missing_font_warning_tests {
 
     #[test]
     fn no_type_layers_do_not_produce_missing_font_warnings() {
-        let folder = std::env::temp_dir().join(format!("photocraft-cli-no-font-warning-{}", std::process::id()));
+        let folder = std::env::temp_dir().join(format!("yorusphoto-cli-no-font-warning-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let native = folder.join("blank.pcraft");
         let png = folder.join("blank.png");
@@ -674,7 +674,7 @@ mod batch_action_set_tests {
     /// failure inside the called action fails the file, and a self-call stops instead of looping.
     #[test]
     fn batch_plays_an_action_that_calls_another_action_of_its_set() {
-        let dir = std::env::temp_dir().join(format!("photocraft-cli-action-set-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("yorusphoto-cli-action-set-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = |name: &str| dir.join(name).to_string_lossy().to_string();
         std::fs::create_dir_all(dir.join("in")).unwrap();

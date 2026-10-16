@@ -1,6 +1,6 @@
 # Where PhotoCraft falls short of Photoshop
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (G8: Character panel OpenType buttons landed, TYPE-218-5 stays partial; G8: triple-, quadruple- and five-click type selection landed, TYPE-218-8 done; Czech UI localization evidence added to G13; G14: D5100 crop and Camera Raw tuning validation) · **Target:** Adobe Photoshop 2026
+> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (G2: scoped Windows movement, Navigator and effect scratch-cache fixes; broader gap remains open) · **Target:** Adobe Photoshop 2026
 
 Every known shortfall against Photoshop 2026 (27.11.0), one entry each, ranked by user impact
 on the way to beta. This is the work list agents pick from: take the highest-ranked entry that
@@ -163,6 +163,12 @@ what an agent can't finish alone.
 - **Estimate:** 150–250 h.
 
 ### G2. Interactive performance
+- **Windows progress (2026-10-16):** yorusphoto v7 parallelizes large native raster
+  translation, retains proxy sampling for large-document Navigator updates and bounds
+  obsolete effect scratch textures by bytes. Release-mode 24/36 MP measurements and
+  their scope are recorded in [the v7 performance notes](yorusphoto-performance.md).
+  This does not change the cross-platform scorecard baseline, budget enforcement,
+  Photoshop comparison or remaining estimate.
 - **Measured progress (2026-10-10):** Tilt-Shift's existing per-level halo/copy
   optimization measures 1.07–1.49× faster across nine local 24 MP cases, with exact
   finite output bits. The filtered proxy improves for medium/large blur; its
@@ -225,6 +231,7 @@ what an agent can't finish alone.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | G2: Windows raster movement, Navigator sampling and scratch-cache fixes; release measurements scoped separately, broader gap remains open |
 | 2026-10-11 | minor | D5100 image area and Camera Raw tuning validation; G14 remains open |
 | 2026-10-11 | minor | G13: Czech dynamic UI text localized; engine messages and native review remain open |
 | 2026-10-11 | minor | G8: triple/quadruple/five-click type selection done (TYPE-218-8, #3493); Type evidence recounted |

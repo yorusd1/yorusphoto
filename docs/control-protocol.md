@@ -582,3 +582,19 @@ dock target. The panel menu and icon rail remain
 available in custom workspaces. `window.panel.<id> {show:true}` always reveals, selects
 and expands the panel, including when another tab is selected. Workspace snapshots
 retain custom collapse settings and Timeline visibility.
+
+## Native AI workflows in yorusphoto
+
+The live `engine.commands` / MCP `command_list` catalog includes native workflow metadata in addition to pure engine commands. `yorusai.run`, `yorusai.remix`, `yorusai.upscale`, `yorusai.layers`, `yorusai.inspect` and `yorusai.cancel` drive the same YorusAi Direct workflow as the right sidebar. `ai.generate`, `codex.send` and `codex.cancel` drive Codex. The provider keys are configured locally and only boolean presence is inspectable.
+
+`ui.inspect` exposes `assistantSidebar.tab` (`codex` or `yorusAi`), `codex.open`, `codexBusy`, `yorusAi.busy`, and `yorusAiSettings.status`. Operations start asynchronously; poll the respective status until busy is false. `window.codex`, `ai.generate` without a prompt, and `window.yorusai` select the native panel without starting a request.
+
+Image workflows capture the visible crop, source document, anchor layer, original rectangle and selection coverage before starting. Selected-area completion inserts a new layer into that saved destination. Explicit whole-image mode opens a separate canvas. Unplaceable results stay available for recovery. See `yorusphoto.md` for modes, provider setup and limits.
+
+The v5 workspace adds `codex.status`, `codex.refresh`, `codex.compact`, `codex.model`, `codex.chats`, `codex.chat.new`, `codex.chat.open`, `codex.chat.rename`, `codex.chat.archive`, `codex.threads.list`, `codex.thread.open` and `codex.thread.fork`. Discover their current parameter schemas and enabled states through `engine.commands` or MCP `command_list`. `codex.chats {search,archived,open}` drives the same bounded local browser as the clock button; omitted fields leave its view unchanged.
+
+The v6 runtime updater adds `codex.updates {automatic?:bool,open?:bool}` to inspect/configure automatic stable updates and `codex.update {}` to force an immediate check and installation. Unknown or invalid fields fail before changing preferences. Both use the same native service as the panel; callers cannot supply a download URL. Status appears in `codex.status.updates` and `ui.inspect.codexWorkspace.updates`, with `automatic`, `running`, `available`, `customExecutable`, `status` and `error`. The sanitized native `status` includes phase, active/bundled/latest versions, last/next check timestamps, a message and whether activation changed the runtime. Wait for `running:false` before consuming the final result. Updates never cancel an existing model task or redirect an image result.
+
+`ui.inspect.codexWorkspace` and `codex.status` return the selected model/reasoning, a sanitized `workspace` snapshot (models, token counts, compaction, account usage and freshness), local chat metadata, `refreshing`, `error`, `remoteThreads` and `nextCursor`. Read-only refreshes and thread listing can be pending while `codexBusy` is false; wait for `codexWorkspace.refreshing` to become false before consuming their final result. Compaction/import/fork also mark `codexBusy` and cannot redirect a retained image. Saved-chat switching and model changes fail without mutation during active tasks or history write failure.
+
+Token counts and account allowances remain distinct. Null or absent fields mean unknown. `used_percent` is consumed allowance; remaining percentage is `100 - used_percent`, clamped at zero. Reset timestamps are UTC Unix seconds. A past timestamp does not itself prove replenishment; refresh through Codex. Snapshots contain no OAuth URL or account email, authentication token, provider secret or image payload. `codex.send` recognizes documented slash commands before creating a model turn; unsupported commands and invalid arguments return a local error.

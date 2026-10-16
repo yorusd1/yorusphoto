@@ -19,6 +19,7 @@ pub mod adjust_dialog;
 pub mod adjust_editors;
 pub mod adjust_preview;
 pub mod adjust_ui;
+pub mod ai_sidebar;
 mod alt_grab;
 pub mod analysis_ui;
 pub mod anchor_tools;
@@ -48,8 +49,15 @@ pub mod channels_panel;
 pub mod chrome_ui;
 pub mod cjk_fonts;
 pub mod clip_line_ui;
+pub mod codex_ui;
 pub mod color_picker_ui;
 pub mod color_range_ui;
+pub mod yorus_ai_ui;
+pub use codex_ui::{
+    AgentCommand, CodexChatRequest, CodexEvent, CodexLoginEvent, CodexUpdateEvent, CodexUpdateRequest, CodexWorkspaceAction, CodexWorkspaceEvent,
+    CodexWorkspaceRequest, ImageGenerationRequest,
+};
+pub use yorus_ai_ui::{DirectBounds, DirectEvent, DirectImage, DirectKeys, DirectRequest};
 pub mod comps_ui;
 pub mod control;
 pub mod credits;
@@ -366,6 +374,16 @@ pub type WindowFrameFn = Box<dyn FnMut()>;
 /// I/O dependencies.
 #[derive(Default)]
 pub struct Services {
+    pub generate_image: Option<codex_ui::GenerateImageFn>,
+    pub codex_chat: Option<codex_ui::CodexChatFn>,
+    pub codex_login: Option<codex_ui::CodexLoginFn>,
+    pub codex_workspace: Option<codex_ui::CodexWorkspaceFn>,
+    pub codex_update: Option<codex_ui::CodexUpdateFn>,
+    pub load_codex_state: Option<codex_ui::LoadCodexStateFn>,
+    pub save_codex_state: Option<codex_ui::SaveCodexStateFn>,
+    pub yorus_ai_generate: Option<yorus_ai_ui::DirectGenerateFn>,
+    pub yorus_ai_key_status: Option<yorus_ai_ui::DirectKeyStatusFn>,
+    pub yorus_ai_save_key: Option<yorus_ai_ui::DirectSaveKeyFn>,
     /// User-initiated desktop/browser pixel sampling.
     pub screen_pick: Option<screen_picker::Service>,
     /// Decode a file's bytes into a document (PSD, PNG, JPEG, …).
@@ -461,6 +479,8 @@ pub(crate) type HistJob = (DocId, u64, std::sync::mpsc::Receiver<(DocId, f64, st
 type InfoSampleKey = (i32, i32, u64, u32);
 
 pub struct PhotocraftApp {
+    pub codex_runtime: codex_ui::Runtime,
+    pub yorus_ai_runtime: yorus_ai_ui::Runtime,
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
@@ -703,6 +723,8 @@ pub struct PhotocraftApp {
 impl PhotocraftApp {
     pub fn new(session: Session, services: Services) -> Self {
         let mut app = Self {
+            codex_runtime: Default::default(),
+            yorus_ai_runtime: Default::default(),
             session,
             ui: UiState::default(),
             services,
@@ -820,6 +842,7 @@ impl PhotocraftApp {
         };
         // Saved preferences are in place before the first frame; recovery starts in upkeep.
         prefs_ui::load(&mut app);
+        codex_ui::restore_conversation(&mut app);
         // After the saved preferences, which say whether the set was already offered.
         kys_import::offer_import(&mut app);
         notices::wayland_file_drop_guidance(&mut app);
@@ -1539,6 +1562,10 @@ impl PhotocraftApp {
 }
 
 impl eframe::App for PhotocraftApp {
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        codex_ui::save_conversation(self);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
         // Caps Lock state read from the OS once per frame (see `Services::caps_lock`): the canvas
@@ -1653,6 +1680,8 @@ impl eframe::App for PhotocraftApp {
             self.automation_input = false;
             return;
         }
+        codex_ui::show(self, &ctx);
+        yorus_ai_ui::poll(self, &ctx);
         let t0 = gpu_canvas::now_ms();
         // A text field's right-click menu, before any field is drawn (text_field_menu.rs).
         text_field_menu::show(&ctx);

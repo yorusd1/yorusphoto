@@ -1,6 +1,7 @@
 *~
 plan/
 /target
+/.toolchain/
 target/
 /dist
 /corpus
@@ -11,3 +12,16 @@ target/
 /craft-fonts
 *.log
 __pycache__/
+/verification/privateconfig/
+/verification/workspace/
+# Local build reports, screenshots, source/binary baselines and machine-state audits.
+/verification/
+# Portable settings and credentials must stay local wherever the app is launched.
+yorusphotoData/
+codex-chat.json
+codex-chat.previous.json
+auth.json
+control.token
+mcp-config.json
+.env
+.env.*

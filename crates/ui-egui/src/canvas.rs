@@ -12,6 +12,9 @@ use serde_json::json;
 use crate::PhotocraftApp;
 use crate::state::{Tool, View};
 
+#[cfg(test)]
+mod navigator_sampling_tests;
+
 /// Largest texture side we upload; bigger documents display downsampled until the GPU path lands.
 pub const MAX_TEXTURE: u32 = 4096;
 
@@ -143,6 +146,15 @@ pub struct Drag {
     /// every Move-tool drag with a selection does (`move_ui::moves_selected_pixels_with`).
     pub sel_move: Option<bool>,
     pub lasso: Option<crate::lasso_ui::Lasso>,
+    marquee_bounds: Option<MarqueeBounds>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MarqueeBounds {
+    pointer: [f64; 2],
+    offset: [f64; 2],
+    repositioning: bool,
+    fixed_size: Option<[f64; 2]>,
 }
 
 impl Drag {
@@ -160,6 +172,7 @@ impl Drag {
             reposition: false,
             sel_move: None,
             lasso: None,
+            marquee_bounds: None,
         }
     }
 
@@ -210,18 +223,129 @@ pub fn marquee_corners(o: &crate::state::ToolOptions, d: &Drag, end: [f64; 2]) -
     ([d.start[0] - hx, d.start[1] - hy], [d.start[0] + hx, d.start[1] + hy])
 }
 
+fn marquee_canvas_size(app: &PhotocraftApp) -> [u32; 2] {
+    app.session.active().map_or([0, 0], |st| [st.doc.size.width, st.doc.size.height])
+}
+
+/// Project a pointer onto the document, including its edge coordinates. In a rotated or flipped
+/// view this is still the nearest point of the image, rather than of its screen-aligned bounds.
+fn marquee_canvas_point(p: [f64; 2], size: [u32; 2]) -> [f64; 2] {
+    [p[0].clamp(0.0, f64::from(size[0])), p[1].clamp(0.0, f64::from(size[1]))]
+}
+
+/// Bound the shape before rounding or committing it. Independently clipping its two axes after
+/// applying a ratio would turn a square into a rectangle when one edge reaches the canvas first.
+fn marquee_bounded_corners(o: &crate::state::ToolOptions, d: &Drag, end: [f64; 2], size: [u32; 2]) -> ([f64; 2], [f64; 2]) {
+    let start = marquee_canvas_point(d.start, size);
+    let end = marquee_canvas_point(end, size);
+    let (shift, alt) = d.marquee_mods();
+    let [w, h] = d.marquee_bounds.as_ref().and_then(|bounds| bounds.fixed_size).unwrap_or([f64::from(o.marquee_width), f64::from(o.marquee_height)]);
+    let e = crate::chrome_ui::marquee_end(&o.marquee_style, w, h, shift, start, end);
+    let mut extent = [e[0] - start[0], e[1] - start[1]];
+    if !start.into_iter().chain(extent).all(f64::is_finite) {
+        return ([0.0, 0.0], [0.0, 0.0]);
+    }
+    if alt && o.marquee_style == "fixedSize" {
+        extent = extent.map(|v| v / 2.0);
+    }
+    let limit = [0, 1].map(|axis| {
+        let far = f64::from(size[axis]) - start[axis];
+        if alt {
+            start[axis].min(far)
+        } else if extent[axis] < 0.0 {
+            start[axis]
+        } else {
+            far
+        }
+    });
+    let constrained = o.marquee_style == "fixedSize" || (o.marquee_style == "fixedRatio" && o.marquee_width > 0.0 && o.marquee_height > 0.0) || shift;
+    if constrained {
+        let scale = [0, 1].into_iter().filter(|&axis| extent[axis] != 0.0).map(|axis| limit[axis] / extent[axis].abs()).fold(1.0, f64::min);
+        extent = extent.map(|v| v * scale);
+    } else {
+        extent = [0, 1].map(|axis| extent[axis].clamp(-limit[axis], limit[axis]));
+    }
+    let a = if alt { [start[0] - extent[0], start[1] - extent[1]] } else { start };
+    (a, [start[0] + extent[0], start[1] + extent[1]])
+}
+
+/// Space repositions a marquee while keeping its edges on the document.
+fn marquee_shift_to(d: &mut Drag, o: &crate::state::ToolOptions, size: [u32; 2], to: [f64; 2]) {
+    let mut last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
+    let (a, b) = marquee_bounded_corners(o, d, last, size);
+    if !a.into_iter().chain(b).chain(last).chain(to).all(f64::is_finite) {
+        return;
+    }
+    let mut bounds = d.marquee_bounds.clone().unwrap_or(MarqueeBounds { pointer: last, ..Default::default() });
+    if !bounds.repositioning {
+        // Space moves the shape that is actually visible, not the larger pre-clamp gesture.
+        // Keep the raw-pointer offset so pressing/releasing Space never jumps its far corner.
+        let (_, alt) = d.marquee_mods();
+        d.start = if alt { [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0] } else { a };
+        if let Some(p) = d.points.last_mut() {
+            p[0] = b[0];
+            p[1] = b[1];
+        }
+        last = b;
+        bounds.offset = [b[0] - bounds.pointer[0], b[1] - bounds.pointer[1]];
+        bounds.repositioning = true;
+        if o.marquee_style == "fixedSize" {
+            bounds.fixed_size = Some([(b[0] - a[0]).abs(), (b[1] - a[1]).abs()]);
+        }
+    }
+    let delta = [0, 1].map(|axis| (to[axis] + bounds.offset[axis] - last[axis]).clamp(-a[axis].min(b[axis]), f64::from(size[axis]) - a[axis].max(b[axis])));
+    d.shift_to([last[0] + delta[0], last[1] + delta[1]]);
+    let placed = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
+    bounds.offset = [placed[0] - to[0], placed[1] - to[1]];
+    bounds.pointer = to;
+    d.marquee_bounds = Some(bounds);
+}
+
+fn marquee_pointer_point(d: &mut Drag, size: [u32; 2], to: [f64; 2]) -> [f64; 2] {
+    let bounds = d.marquee_bounds.get_or_insert_with(MarqueeBounds::default);
+    bounds.pointer = to;
+    bounds.repositioning = false;
+    marquee_canvas_point([to[0] + bounds.offset[0], to[1] + bounds.offset[1]], size)
+}
+
 /// The pixel rectangle a Rectangular/Elliptical Marquee drag selects so far: shown live (ants
 /// and readout) exactly as the release commits it, on whole pixel edges as in Photoshop. `None`
 /// while the gesture is still a click (it never left the press point by more than a few screen
 /// pixels at `zoom`, points per document pixel) or the rectangle has no area: a release then
 /// deselects. A one-pixel row or column is a selection (#2391).
-pub(crate) fn marquee_preview_px(o: &crate::state::ToolOptions, d: &Drag, zoom: f32) -> Option<[f64; 4]> {
-    if !matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) || crate::shape_dialog::is_click(d.start, &d.points, zoom) {
+pub(crate) fn marquee_preview_px(o: &crate::state::ToolOptions, d: &Drag, zoom: f32, size: [u32; 2]) -> Option<[f64; 4]> {
+    if !matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) || size.contains(&0) || crate::shape_dialog::is_click(d.start, &d.points, zoom) {
         return None;
     }
     let last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
-    let (a, b) = marquee_corners(o, d, last);
-    let r = marquee_px(a, b);
+    let (a, b) = marquee_bounded_corners(o, d, last, size);
+    if !a.into_iter().chain(b).all(f64::is_finite) {
+        return None;
+    }
+    let mut r = marquee_px(a, b);
+    let (shift, alt) = d.marquee_mods();
+    if o.marquee_style == "fixedRatio" || o.marquee_style == "fixedSize" || shift {
+        if a[0] == b[0] || a[1] == b[1] {
+            return None;
+        }
+        // Round the dimensions together: rounding both corners independently can otherwise add
+        // an extra pixel on only one axis of a fractional square. Other ratios stay pixel-accurate.
+        let mut extent = [(b[0] - a[0]).abs(), (b[1] - a[1]).abs()];
+        let square = match o.marquee_style.as_str() {
+            "fixedRatio" | "fixedSize" => o.marquee_width > 0.0 && o.marquee_width == o.marquee_height,
+            _ => shift,
+        };
+        if square {
+            extent = [extent[0].max(extent[1]); 2];
+        }
+        let extent = extent.map(|v| v.round().max(1.0));
+        for axis in [0, 1] {
+            let origin =
+                if alt { ((a[axis] + b[axis] - extent[axis]) / 2.0).round() } else { a[axis].round() - if b[axis] < a[axis] { extent[axis] } else { 0.0 } };
+            r[axis] = origin.clamp(0.0, f64::from(size[axis]) - extent[axis]);
+            r[axis + 2] = r[axis] + extent[axis];
+        }
+    }
     (r[2] > r[0] && r[3] > r[1]).then_some(r)
 }
 
@@ -1092,6 +1216,26 @@ fn navigator_waits_for_drag(app: &PhotocraftApp, idx: usize) -> bool {
     crate::move_ui::showing(app) || crate::patch_preview::showing(app) || live_stroke(app, idx).is_some()
 }
 
+/// A reduced damage render visits the original pixels. Large, proxy-faithful documents must
+/// keep using the same proxy as their initial thumbnail: a full-layer visibility change would
+/// otherwise run a full-resolution CPU composite beside the GPU canvas. Mixing an exact patch
+/// into a sampled proxy thumbnail also changes the sampling at the patch boundary.
+fn navigator_uses_proxy(doc: &Document) -> bool {
+    doc.size.area() > photocraft_compose::PROXY_THUMBNAIL_PIXELS
+        && doc.size.width.max(doc.size.height) / NAVIGATOR_SIDE.saturating_mul(2) >= 2
+        && photocraft_compose::proxy::proxy_faithful(doc)
+}
+
+fn navigator_can_patch(doc: &Document, damage: DRect) -> bool {
+    damage.is_empty() || !navigator_uses_proxy(doc)
+}
+
+/// A snapshot may change sampling policy (for example when adding a layer effect). Only
+/// patch when both images use the exact reducer; an expired weak snapshot cannot prove that.
+fn navigator_patch_compatible(before: Option<&Document>, after: &Document, damage: DRect) -> bool {
+    before.is_some_and(|doc| navigator_uses_proxy(doc) == navigator_uses_proxy(after) && navigator_can_patch(after, damage))
+}
+
 /// The Navigator panel's image of document `idx`. With the CPU canvas that is the canvas texture
 /// itself; with the GPU canvas a thumbnail cached per revision, so an edit to a huge document
 /// doesn't also pay a full-resolution CPU composite for the navigator.
@@ -1131,10 +1275,11 @@ pub fn navigator_texture(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     // for a rename, a selection or a new empty layer). A thumbnail composite of the whole
     // document on every edit cost a full-resolution CPU composite on the UI thread.
     let size = photocraft_compose::thumbnail_size(&doc, NAVIGATOR_SIDE);
-    if let Some((_, p, rev, t)) = &cached
+    if let Some((prior, p, rev, t)) = &cached
         && *p == preview_key
         && rev.checked_add(1) == Some(revision)
         && let Some(d) = last_damage
+        && navigator_patch_compatible(prior.upgrade().as_deref(), &doc, d)
         && t.size() == [size.0 as usize, size.1 as usize]
     {
         let mut t = t.clone();
@@ -2373,13 +2518,51 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     // File › Open Recent, newest first (on the web there are no paths to reopen).
     let recent: Vec<String> = if cfg!(target_arch = "wasm32") { Vec::new() } else { app.ui.recent_files.iter().take(HOME_RECENT).cloned().collect() };
     let recent_h = if recent.is_empty() { 0.0 } else { 34.0 + recent.len() as f32 * HOME_RECENT_ROW };
-    let card = Rect::from_center_size(area.center(), egui::vec2(460.0, 330.0 + recent_h));
+    if area.width() < 500.0 {
+        egui::ScrollArea::vertical().id_salt("compact-home").max_height(area.height()).auto_shrink([false, false]).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(18.0);
+                let (logo, _) = ui.allocate_exact_size(egui::vec2(64.0, 64.0), Sense::hover());
+                crate::brand::paint_logo(ui, logo);
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(crate::brand::APP_NAME).font(crate::theme::semibold(28.0)).color(t.text));
+                ui.label(egui::RichText::new(tl!("Create a new document or open an existing file.")).color(t.text_dim));
+                ui.add_space(14.0);
+                let button_width = ui.available_width().min(210.0);
+                let new_label = crate::shortcuts::command_label(app, "New document…", "file.new");
+                if crate::widgets::primary_button(ui, &new_label, button_width).clicked() {
+                    let fields = app.new_document_fields();
+                    app.ui.open_dialog(crate::state::DialogKind::NewDocument, fields);
+                }
+                ui.add_space(8.0);
+                let open_label = crate::shortcuts::command_label(app, "Open…", "file.open");
+                if crate::widgets::secondary_button(ui, &open_label, button_width).clicked() {
+                    let _ = app.open_dialog_file();
+                }
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new(start_screen_drop_hint(app)).small().color(t.text_faint));
+                if !recent.is_empty() {
+                    ui.add_space(14.0);
+                    home_recent(app, ui, &recent);
+                }
+                ui.add_space(16.0);
+                if crate::widgets::secondary_button(ui, "Open Codex", button_width).clicked() {
+                    let _ = crate::menus::invoke(app, ui.ctx(), "window.codex", serde_json::json!({}));
+                }
+            });
+        });
+        return;
+    }
+    let card = Rect::from_center_size(area.center(), egui::vec2(460.0, 426.0 + recent_h));
     let new_label = crate::shortcuts::command_label(app, "New document…", "file.new");
     let open_label = crate::shortcuts::command_label(app, "Open…", "file.open");
     ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
         ui.vertical_centered(|ui| {
+            let (logo_rect, _) = ui.allocate_exact_size(egui::vec2(88.0, 88.0), Sense::hover());
+            crate::brand::paint_logo(ui, logo_rect);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let title = ui.painter().layout_no_wrap(tl!("PhotoCraft").into(), crate::theme::semibold(38.0), t.text);
+                let title = ui.painter().layout_no_wrap("yorusphoto".into(), crate::theme::semibold(38.0), t.text);
                 let by = ui.painter().layout_no_wrap(tl!("open source").into(), egui::FontId::proportional(13.0), t.text_faint);
                 let total = title.size().x + by.size().x + 10.0;
                 ui.add_space(((card.width() - total) / 2.0).max(0.0));
@@ -2416,9 +2599,9 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 home_recent(app, ui, &recent);
             }
             ui.add_space(26.0);
-            crate::links::discord_button(app, ui, 190.0);
-            ui.add_space(10.0);
-            crate::links::link_row(app, ui);
+            if crate::widgets::secondary_button(ui, "Open Codex", 190.0).clicked() {
+                let _ = crate::menus::invoke(app, ui.ctx(), "window.codex", serde_json::json!({}));
+            }
         });
     });
 }
@@ -2442,7 +2625,7 @@ const HOME_RECENT_ROW: f32 = 30.0;
 /// and Clear Recent Files (#2691).
 fn home_recent(app: &mut PhotocraftApp, ui: &mut egui::Ui, recent: &[String]) {
     let t = crate::theme::Tokens::get(ui.ctx());
-    let width = 380.0;
+    let width = ui.available_width().min(380.0);
     ui.horizontal(|ui| {
         // Line the heading up with the file icons.
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0) + 8.0);
@@ -4262,7 +4445,7 @@ fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &View
         return;
     }
     let last = d.points.last().map(|p| [p[0], p[1]]).unwrap_or(d.start);
-    let marquee = marquee_preview_px(&app.ui.tool_options, d, app.point_zoom());
+    let marquee = marquee_preview_px(&app.ui.tool_options, d, app.point_zoom(), marquee_canvas_size(app));
     if let Some(r) = marquee {
         draw_marquee_readout(app, painter.ctx(), xf.to_screen(last[0] as f32, last[1] as f32), size_readout(app, r));
     }
@@ -4458,11 +4641,18 @@ fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui:
         crate::vector_ui::curvature_move(app, x, y);
     }
     let zoom = app.point_zoom();
+    let size = marquee_canvas_size(app);
     if let Some(d) = app.drag.as_mut().filter(|d| d.reposition) {
         d.track(mods);
-        d.shift_to([x, y]);
+        if matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && d.sel_move.is_none() {
+            marquee_shift_to(d, &app.ui.tool_options, size, [x, y]);
+        } else {
+            d.shift_to([x, y]);
+        }
     } else if let Some(d) = &mut app.drag {
         d.track(mods);
+        let [x, y] =
+            if matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && d.sel_move.is_none() { marquee_pointer_point(d, size, [x, y]) } else { [x, y] };
         // ⇧: straight 0/45/90° strokes, 45° gradient angles (stroke_constraint.rs).
         let last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
         let [x, y] = crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom);
@@ -4676,6 +4866,14 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     }
     match ev {
         ToolEvent::Down { x, y, pressure } => {
+            let intent = if matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee) {
+                match raw {
+                    ToolEvent::Down { x, y, .. } => [x, y],
+                    _ => [x, y],
+                }
+            } else {
+                [x, y]
+            };
             // Painting a type, shape, Smart Object or fill layer asks to rasterize it first
             // (⌥-click with the Clone Stamp or Healing Brush only sets the source).
             let sets_source = matches!(tool, Tool::CloneStamp | Tool::Healing) && mods.alt;
@@ -4691,7 +4889,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             // ⌘ with a selection tool is the Move tool for the drag: outside the selection (or
             // without one) it moves the whole layer, ⌘⌥ a duplicate of it. It never combines
             // selections.
-            if command_moves_layer(app, tool, [x, y], mods) {
+            if command_moves_layer(app, tool, intent, mods) {
                 if mods.alt
                     && let Err(e) = app.run("layer.duplicate", json!({"inPlace": true}))
                 {
@@ -4704,7 +4902,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             }
             // Marquee / lasso inside the selection: drag the outline, or ⌘-drag to cut the selected
             // pixels into a floating piece (`select.float`) and drag that.
-            if let Some(cut) = selection_drag_kind(app, tool, [x, y], mods) {
+            if let Some(cut) = selection_drag_kind(app, tool, intent, mods) {
                 // ⌘⌥ on a floating piece leaves it where it is and drags a copy of it.
                 if cut
                     && mods.alt
@@ -4799,13 +4997,18 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             // the renderer interpolates size and opacity across the segment.
             let active = app.session.active().map(|st| st.doc.id);
             let from = app.last_stroke_end.filter(|(doc, _)| mods.shift && crate::stroke_constraint::connects(tool) && Some(*doc) == active).map(|(_, p)| p);
+            let [x, y] = if matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee) { marquee_canvas_point([x, y], marquee_canvas_size(app)) } else { [x, y] };
             let mut points = vec![[x, y, pressure as f64]];
             if let Some(p) = from {
                 points.insert(0, p);
             }
             // ⌥ flips Dodge/Burn and Blur/Sharpen for this stroke.
             let tool = crate::retouch_ui::alt_flipped(tool, mods.alt);
-            app.drag = Some(Drag { clear, ..Drag::new(tool, from.map_or([x, y], |p| [p[0], p[1]]), points, mods, erase) });
+            let mut drag = Drag { clear, ..Drag::new(tool, from.map_or([x, y], |p| [p[0], p[1]]), points, mods, erase) };
+            if matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee) {
+                drag.marquee_bounds = Some(MarqueeBounds { pointer: intent, ..Default::default() });
+            }
+            app.drag = Some(drag);
             app.trail = None;
             app.stylus.begin_stroke();
             if from.is_some() {
@@ -4840,9 +5043,21 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             let zoom = app.point_zoom();
             let Some(mut d) = app.drag.take() else { return };
             d.track(mods);
+            let drawing_marquee = matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && d.sel_move.is_none();
             if d.reposition {
-                d.shift_to([x, y]);
+                if drawing_marquee {
+                    marquee_shift_to(&mut d, &app.ui.tool_options, marquee_canvas_size(app), [x, y]);
+                } else {
+                    d.shift_to([x, y]);
+                }
             }
+            let [x, y] = if drawing_marquee && d.reposition {
+                d.points.last().map_or(d.start, |p| [p[0], p[1]])
+            } else if drawing_marquee {
+                marquee_pointer_point(&mut d, marquee_canvas_size(app), [x, y])
+            } else {
+                [x, y]
+            };
             let last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
             let [x, y] = crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom);
             // A Move-tool click (released where it was pressed) selects, it never moves: snapping
@@ -5116,7 +5331,7 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
         Tool::Brush | Tool::Pencil | Tool::Eraser => commit_brush_stroke(app, &d),
         Tool::RectMarquee | Tool::EllipseMarquee => {
             // Exactly what the drag showed (`marquee_preview_px`); a click deselects.
-            let Some([x0, y0, x1, y1]) = marquee_preview_px(&app.ui.tool_options, &d, app.point_zoom()) else {
+            let Some([x0, y0, x1, y1]) = marquee_preview_px(&app.ui.tool_options, &d, app.point_zoom(), marquee_canvas_size(app)) else {
                 if app.session.is_enabled("select.deselect") {
                     let _ = app.run("select.deselect", json!({}));
                 }
@@ -5657,6 +5872,42 @@ mod tests {
     }
 
     #[test]
+    fn large_navigator_edits_keep_the_proxy_sampling_and_work_bound() {
+        use photocraft_color::{ColorMode, SampleType};
+        use photocraft_doc::{Document, Size};
+        for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            let doc = Document::new("36 MP", Size::new(7200, 5000), ColorMode::Rgb, depth);
+            assert!(!navigator_can_patch(&doc, doc.bounds()), "a visibility toggle must not composite 36 MP on the CPU");
+            assert!(!navigator_can_patch(&doc, DRect::new(51, 37, 77, 61)), "a brush edit must not mix exact and proxy samples");
+            assert!(navigator_can_patch(&doc, DRect::EMPTY), "metadata-only changes can retain the existing image");
+        }
+    }
+
+    #[test]
+    fn navigator_keeps_exact_damage_for_small_or_nonproxy_documents() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 1500, "height": 900})).unwrap();
+        let doc = &app.session.active().unwrap().doc;
+        assert!(navigator_can_patch(doc, doc.bounds()));
+        // Effects use document-pixel sizes and must continue through the exact renderer.
+        app.run("file.new", json!({"width": 6000, "height": 4000})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        let before_effect = app.session.active().unwrap().doc.clone();
+        app.run("layer.layerStyle.dropShadow", json!({"distance": 30, "size": 20})).unwrap();
+        let doc = &app.session.active().unwrap().doc;
+        assert!(navigator_can_patch(doc, doc.bounds()));
+        let damage = DRect::new(100, 100, 200, 200);
+        assert!(!navigator_patch_compatible(Some(&before_effect), doc, damage), "adding an effect changes proxy sampling outside the edited region too");
+        assert!(!navigator_patch_compatible(Some(doc), &before_effect, damage), "removing the effect must also rebuild the proxy");
+        assert!(!navigator_patch_compatible(None, doc, damage), "an expired snapshot cannot establish the previous sampling policy");
+        assert!(navigator_patch_compatible(Some(doc), doc, damage), "two exact samples retain bounded updates");
+        assert!(!navigator_patch_compatible(Some(&before_effect), doc, DRect::EMPTY), "styling an empty layer still changes thumbnail sampling");
+        assert!(!navigator_patch_compatible(Some(doc), &before_effect, DRect::EMPTY));
+        assert!(navigator_patch_compatible(Some(&before_effect), &before_effect, DRect::EMPTY));
+        assert!(!navigator_patch_compatible(None, doc, DRect::EMPTY));
+    }
+
+    #[test]
     fn tab_context_uses_clicked_document_and_existing_close_commands() {
         let items = tab_context_items(2, 3, true);
         assert_eq!(items.iter().map(|(_, id, _, _)| *id).collect::<Vec<_>>(), ["file.close", "file.closeOthers", "file.closeAll", "file.revealInFinder"]);
@@ -5994,6 +6245,25 @@ mod tests {
         assert_eq!(centre("normal"), Color32::WHITE);
         assert_eq!(centre("difference"), Color32::BLACK, "Difference turns black where source and image match");
         assert_eq!(centre("lighten"), Color32::WHITE);
+    }
+
+    #[test]
+    fn compact_welcome_with_recent_files_fits_beside_the_assistant() {
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::Studio);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.push_recent("/tmp/yorusphoto/welcome-layout.png");
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 420.0));
+        let mut bounds = Rect::NOTHING;
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(rect), ..Default::default() }, |ui| {
+            start_screen(&mut app, ui);
+            bounds = ui.min_rect();
+        });
+        output.textures_delta.clear();
+        assert!(!output.shapes.is_empty());
+        assert!(bounds.left() >= rect.left() && bounds.right() <= rect.right() + 1.0, "{bounds:?}");
+        assert!(bounds.bottom() <= rect.bottom() + 1.0, "{bounds:?}");
+        assert!(app.session.active().is_none(), "rendering must not open recent files");
     }
 
     #[test]

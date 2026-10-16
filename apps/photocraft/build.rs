@@ -6,19 +6,19 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../assets/app-icon/photocraft.ico");
+    println!("cargo:rerun-if-changed=../../assets/yorusphoto/yorusphoto.ico");
     println!("cargo:rerun-if-env-changed=PHOTOCRAFT_REQUIRE_WINRES");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let mut res = winresource::WindowsResource::new();
-    res.set_icon("../../assets/app-icon/photocraft.ico")
-        .set("ProductName", "PhotoCraft")
-        .set("FileDescription", "PhotoCraft image editor")
-        .set("CompanyName", "Learning Machines LLC")
+    res.set_icon("../../assets/yorusphoto/yorusphoto.ico")
+        .set("ProductName", "yorusphoto")
+        .set("FileDescription", "yorusphoto image editor")
+        .set("CompanyName", "Yorus")
         .set("LegalCopyright", "Copyright (c) the PhotoCraft authors. MIT OR Apache-2.0.")
-        .set("OriginalFilename", "photocraft.exe")
-        .set("InternalName", "photocraft");
+        .set("OriginalFilename", "yorusphoto.exe")
+        .set("InternalName", "yorusphoto");
     if let Err(e) = res.compile() {
         if std::env::var_os("PHOTOCRAFT_REQUIRE_WINRES").is_some() {
             panic!("embedding Windows resources failed: {e}");

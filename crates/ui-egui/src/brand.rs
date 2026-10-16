@@ -1,13 +1,14 @@
-//! The PhotoCraft brand mark at the left of the title bar: the app icon (the kitsune,
-//! `assets/app-icon/`, see its README), where Photoshop shows its "Ps" tile. The PNG carries the
-//! icon's rounded corners; it is decoded once per context into a mipmapped texture, so it stays
-//! crisp at the title bar's size on any display scale.
+//! The supplied yorusphoto brand mark, decoded once per context into a mipmapped texture.
+//! The original image and its resized encodings live in `assets/yorusphoto/`.
 
 use egui::{Color32, Context, Id, Rect, TextureHandle, TextureOptions, Ui, pos2};
 use photocraft_codecs::{ChannelLayout, SampleType};
 
+/// Product identity used by native menus, windows and local product information.
+pub const APP_NAME: &str = "yorusphoto";
+
 /// 128 px: sharp at 20 pt on a 3× display, and the mipmaps keep it clean at 1×.
-const ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png");
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/yorusphoto/icon-128.png");
 
 /// The icon's pixels (one transparent pixel if it couldn't be decoded, which a test rules out).
 fn decode() -> egui::ColorImage {
@@ -39,9 +40,14 @@ fn rect_id() -> Id {
 
 /// Paint the mark into `r` (square).
 pub fn paint_mark(ui: &Ui, r: Rect) {
+    paint_logo(ui, r);
+    ui.ctx().data_mut(|d| d.insert_temp(rect_id(), r));
+}
+
+/// Paint the same logo in the welcome screen or About dialog.
+pub fn paint_logo(ui: &Ui, r: Rect) {
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     ui.painter().image(texture(ui.ctx()).id(), r, uv, Color32::WHITE);
-    ui.ctx().data_mut(|d| d.insert_temp(rect_id(), r));
 }
 
 /// The rect the mark was last painted into.
@@ -55,11 +61,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_icon_decodes_to_a_rounded_128_px_tile() {
+    fn the_supplied_icon_decodes_to_an_opaque_128_px_tile() {
         let img = decode();
         assert_eq!(img.size, [128, 128]);
-        // Rounded corners: the corner pixel is transparent, the centre opaque.
-        assert_eq!(img.pixels[0].a(), 0);
+        // Preserve the supplied image's opaque background and mark.
+        assert_eq!(img.pixels[0].a(), 255);
         assert_eq!(img.pixels[64 * 128 + 64].a(), 255);
     }
 
