@@ -20,7 +20,9 @@ Model availability and allowances come from the signed-in Codex account. Context
 
 ## Windows portable
 
-Run `Start-yorusphoto.cmd` inside your existing `yorusphoto-portable-v7` folder. The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local.
+[Download the Windows 64-bit portable release](https://github.com/yorusd1/yorusphoto/releases/latest). Under **Assets**, choose `yorusphoto-v7-windows-x64-portable.zip`, extract the entire ZIP into a writable folder, and run `Start-yorusphoto.cmd`. No installation or source checkout is required. A matching SHA-256 checksum is provided. Downloads require access to this private repository.
+
+The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local. Existing users can continue running `Start-yorusphoto.cmd` in their `yorusphoto-portable-v7` folder. Sign in with your own ChatGPT account for Codex, or configure your own provider keys for YorusAi Direct.
 
 Portable binaries, downloaded Codex runtimes, private settings, chat histories, credentials and local recovery copies are excluded from this Git repository. The repository contains the source, branding, packaging scripts and reusable checks.
 
