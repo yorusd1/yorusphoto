@@ -127,6 +127,8 @@ if ($ArchiveOnly) {
     foreach ($runtimeFile in @(Get-CodexDistributionFiles $archiveRuntimeRoot $archiveRuntimeManifest)) {
         $entries += @{ Source = $runtimeFile.Source; Name = 'codex/' + $runtimeFile.RelativePath }
     }
+    # Windows PowerShell 5.1 loads neither assembly by default (ZipArchiveMode lives in the first).
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
     try {
