@@ -3764,3 +3764,29 @@ curves	Smooth	Εξομάλυνση
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 δρόμων
+	As Shot	Όπως λήφθηκε
+	Auto tone (Ctrl+Shift+U)	Αυτόματος τόνος (Ctrl+Shift+U)
+	B&W Mix	Μίξη Α/Μ
+	Back to the settings the dialog opened with	Επιστροφή στις ρυθμίσεις με τις οποίες άνοιξε το παράθυρο
+	Blue Primary	Κύριο μπλε
+	Calibration	Βαθμονόμηση
+	Green Primary	Κύριο πράσινο
+	Parametric	Παραμετρική
+	Preview not updated	Η προεπισκόπηση δεν ενημερώθηκε
+	Red Primary	Κύριο κόκκινο
+	Reset {section}	Επαναφορά: {section}
+	RGB	RGB
+	Shadows Tint	Απόχρωση σκιών
+	White Balance	Ισορροπία λευκού
+	White Balance Tool (I)	Εργαλείο ισορροπίας λευκού (I)
+	Shadows / Darks split	Όριο Σκιές / Σκοτεινοί τόνοι
+	Darks / Lights split	Όριο Σκοτεινοί τόνοι / Φωτεινοί τόνοι
+	Lights / Highlights split	Όριο Φωτεινοί τόνοι / Φωτεινές περιοχές
+	Black & White (V)	Ασπρόμαυρο (V)
+	draft	πρόχειρο
+	Camera Raw preview failed; the previous preview remains	Η προεπισκόπηση του Camera Raw απέτυχε· παραμένει η προηγούμενη προεπισκόπηση
+	Camera Raw preview worker stopped	Η διεργασία προεπισκόπησης του Camera Raw σταμάτησε
+	Cannot start the Camera Raw preview worker	Δεν είναι δυνατή η εκκίνηση της διεργασίας προεπισκόπησης του Camera Raw

@@ -20,9 +20,9 @@ Model availability and allowances come from the signed-in Codex account. Context
 
 ## Windows portable
 
-[Download the Windows 64-bit portable release](https://github.com/yorusd1/yorusphoto/releases/latest). Under **Assets**, choose `yorusphoto-v7-windows-x64-portable.zip`, extract the entire ZIP into a writable folder, and run `Start-yorusphoto.cmd`. No installation or source checkout is required. A matching SHA-256 checksum is provided. Downloads require access to this private repository.
+[Download the Windows 64-bit portable release](https://github.com/yorusd1/yorusphoto/releases/latest). Under **Assets**, choose `yorusphoto-v8-windows-x64-portable.zip`, extract the entire ZIP into a writable folder, and run `Start-yorusphoto.cmd`. No installation or source checkout is required. A matching SHA-256 checksum is provided. Downloads require access to this private repository.
 
-The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local. Existing users can continue running `Start-yorusphoto.cmd` in their `yorusphoto-portable-v7` folder. Sign in with your own ChatGPT account for Codex, or configure your own provider keys for YorusAi Direct.
+The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local. To update from v7, extract v8 into a new folder; your v7 folder and its settings are left untouched. v8 makes Camera Raw responsive and adds Auto, the White Balance tool, per-channel curves, colour-grading wheels, Black & White and Calibration ([details](docs/camera-raw-histogram.md)). Sign in with your own ChatGPT account for Codex, or configure your own provider keys for YorusAi Direct.
 
 Portable binaries, downloaded Codex runtimes, private settings, chat histories, credentials and local recovery copies are excluded from this Git repository. The repository contains the source, branding, packaging scripts and reusable checks.
 

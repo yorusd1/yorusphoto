@@ -3985,3 +3985,28 @@ cameraRaw	Yellow	Sárga
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 utas
+	As Shot	Felvétel szerint
+	Auto tone (Ctrl+Shift+U)	Automatikus tónus (Ctrl+Shift+U)
+	B&W Mix	FF keverés
+	Back to the settings the dialog opened with	Vissza a párbeszédablak megnyitásakor érvényes beállításokra
+	Blue Primary	Kék alapszín
+	Calibration	Kalibrálás
+	Green Primary	Zöld alapszín
+	Parametric	Parametrikus
+	Preview not updated	Az előnézet nem frissült
+	Red Primary	Vörös alapszín
+	Reset {section}	{section} visszaállítása
+	Shadows Tint	Árnyékok színezete
+	White Balance	Fehéregyensúly
+	White Balance Tool (I)	Fehéregyensúly eszköz (I)
+	Shadows / Darks split	Határ: Árnyékok / Sötét tónusok
+	Darks / Lights split	Határ: Sötét tónusok / Világos tónusok
+	Lights / Highlights split	Határ: Világos tónusok / Csúcsfények
+	Black & White (V)	Fekete-fehér (V)
+	draft	vázlat
+	Camera Raw preview failed; the previous preview remains	A Camera Raw előnézet sikertelen; az előző előnézet marad
+	Camera Raw preview worker stopped	A Camera Raw előnézeti folyamat leállt
+	Cannot start the Camera Raw preview worker	A Camera Raw előnézeti folyamat nem indítható el

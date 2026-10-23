@@ -3798,3 +3798,28 @@ cameraData	Lens	Lens
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 Yönlü
+	As Shot	Çekildiği gibi
+	Auto tone (Ctrl+Shift+U)	Otomatik ton (Ctrl+Shift+U)
+	B&W Mix	S/B Karışımı
+	Back to the settings the dialog opened with	İletişim kutusu açıldığındaki ayarlara dön
+	Blue Primary	Mavi Birincil
+	Calibration	Kalibrasyon
+	Green Primary	Yeşil Birincil
+	Parametric	Parametrik
+	Preview not updated	Önizleme güncellenmedi
+	Red Primary	Kırmızı Birincil
+	Reset {section}	{section} sıfırla
+	Shadows Tint	Gölge Tonu
+	White Balance	Beyaz Dengesi
+	White Balance Tool (I)	Beyaz Dengesi Aracı (I)
+	Shadows / Darks split	Gölgeler / Koyular ayrımı
+	Darks / Lights split	Koyular / Açıklar ayrımı
+	Lights / Highlights split	Açıklar / Öne Çıkanlar ayrımı
+	Black & White (V)	Siyah Beyaz (V)
+	draft	taslak
+	Camera Raw preview failed; the previous preview remains	Camera Raw önizlemesi başarısız oldu; önceki önizleme korunuyor
+	Camera Raw preview worker stopped	Camera Raw önizleme işlemi durdu
+	Cannot start the Camera Raw preview worker	Camera Raw önizleme işlemi başlatılamıyor

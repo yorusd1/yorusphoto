@@ -3676,3 +3676,28 @@ curves	Smooth	スムーズ
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3-way
+	As Shot	撮影時の設定
+	Auto tone (Ctrl+Shift+U)	自動補正 (Ctrl+Shift+U)
+	B&W Mix	白黒ミックス
+	Back to the settings the dialog opened with	ダイアログを開いたときの設定に戻す
+	Blue Primary	ブルー原色
+	Calibration	キャリブレーション
+	Green Primary	グリーン原色
+	Parametric	パラメトリック
+	Preview not updated	プレビューは更新されていません
+	Red Primary	レッド原色
+	Reset {section}	{section}をリセット
+	Shadows Tint	シャドウの色かぶり補正
+	White Balance	ホワイトバランス
+	White Balance Tool (I)	ホワイトバランスツール (I)
+	Shadows / Darks split	シャドウ / 暗部 の境界
+	Darks / Lights split	暗部 / 明部 の境界
+	Lights / Highlights split	明部 / ハイライト の境界
+	Black & White (V)	白黒 (V)
+	draft	下書き
+	Camera Raw preview failed; the previous preview remains	Camera Raw のプレビューに失敗しました。前のプレビューを表示しています
+	Camera Raw preview worker stopped	Camera Raw のプレビュー処理が停止しました
+	Cannot start the Camera Raw preview worker	Camera Raw のプレビュー処理を開始できません

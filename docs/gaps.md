@@ -1,6 +1,6 @@
 # Where PhotoCraft falls short of Photoshop
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (G2: scoped Windows movement, Navigator and effect scratch-cache fixes; broader gap remains open) · **Target:** Adobe Photoshop 2026
+> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-23 · **Change:** minor (G14: Camera Raw speed and new controls; masking and PSD mapping remain open) · **Target:** Adobe Photoshop 2026
 
 Every known shortfall against Photoshop 2026 (27.11.0), one entry each, ranked by user impact
 on the way to beta. This is the work list agents pick from: take the highest-ranked entry that
@@ -96,14 +96,21 @@ what an agent can't finish alone.
 
 ### G14. Camera Raw depth
 - **Missing:** CR3 (detected, unsupported), compressed RAF, lossy DNG (FILE-215-11), .xmp
-  sidecars, masking and calibration in the Camera Raw dialog, per-camera colour for non-DNG
-  cameras, lens profiles.
+  sidecars, masking in the Camera Raw dialog, per-camera colour for non-DNG cameras, lens
+  profiles, PSD mapping of the Black & White treatment and Calibration controls.
 - **Evidence:** `crates/raw/src/lib.rs:219` (CR3), scorecard FILE-215-11/12, #50.
 - **Progress (2026-10-11):** on the embedded-JPEG rendering work in #2135, Camera Raw
   tuning retains the fitted look and applies user gains afterwards. Three D5100 NEFs
   establish a guarded 4928 × 3264 image area. This is an estimated rendering, not a
   measured D5100 colour calibration; [validation](nikon-nef-development.md).
-- **Estimate:** 120–200 h.
+- **Progress (2026-10-23):** the dialog no longer lags. A typical edit's proxy develop fell from
+  about 2 s to 0.1 s (900 × 600; Highlights / Shadows 1 s → 41 ms), stages are cached so
+  colour, detail and effects controls skip the tone stages, and the preview renders in the
+  background with drafts while dragging ([camera-raw-histogram](camera-raw-histogram.md)).
+  Added Auto tone, Auto white balance and the White Balance tool, per-channel point curves and
+  region splits, colour-wheel grading, Black & White with B&W Mix, and Calibration (our own
+  approximations; not mapped to PSD yet, so such filters are refused on PSD export).
+- **Estimate:** 110–190 h.
 
 ### G15. AI and generative features
 - **Missing:** Generative Fill and Expand, Generative Upscale, Neural Filters, Sky Replacement,
@@ -231,6 +238,7 @@ what an agent can't finish alone.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | G14: Camera Raw interactive speed, Auto / White Balance tool, Calibration and Black & White; masking and PSD mapping remain open |
 | 2026-10-16 | minor | G2: Windows raster movement, Navigator sampling and scratch-cache fixes; release measurements scoped separately, broader gap remains open |
 | 2026-10-11 | minor | D5100 image area and Camera Raw tuning validation; G14 remains open |
 | 2026-10-11 | minor | G13: Czech dynamic UI text localized; engine messages and native review remain open |

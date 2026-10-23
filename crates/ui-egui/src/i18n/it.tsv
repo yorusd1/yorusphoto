@@ -4029,3 +4029,28 @@ navigator	Zoom	Zoom
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 vie
+	As Shot	Come scattata
+	Auto tone (Ctrl+Shift+U)	Tono automatico (Ctrl+Maiusc+U)
+	B&W Mix	Mix B/N
+	Back to the settings the dialog opened with	Torna alle impostazioni con cui è stata aperta la finestra
+	Blue Primary	Primario blu
+	Calibration	Calibrazione
+	Green Primary	Primario verde
+	Parametric	Parametrica
+	Preview not updated	Anteprima non aggiornata
+	Red Primary	Primario rosso
+	Reset {section}	Ripristina {section}
+	Shadows Tint	Tinta ombre
+	White Balance	Bilanciamento del bianco
+	White Balance Tool (I)	Strumento Bilanciamento del bianco (I)
+	Shadows / Darks split	Divisione Ombre / Toni scuri
+	Darks / Lights split	Divisione Toni scuri / Toni chiari
+	Lights / Highlights split	Divisione Toni chiari / Luci
+	Black & White (V)	Bianco e nero (V)
+	draft	bozza
+	Camera Raw preview failed; the previous preview remains	Anteprima di Camera Raw non riuscita; resta l'anteprima precedente
+	Camera Raw preview worker stopped	Il processo di anteprima di Camera Raw si è interrotto
+	Cannot start the Camera Raw preview worker	Impossibile avviare il processo di anteprima di Camera Raw

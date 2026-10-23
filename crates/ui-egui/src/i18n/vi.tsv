@@ -3551,3 +3551,28 @@ curves	Smooth	Làm mượt
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 chiều
+	As Shot	Như khi chụp
+	Auto tone (Ctrl+Shift+U)	Tông tự động (Ctrl+Shift+U)
+	B&W Mix	Trộn đen trắng
+	Back to the settings the dialog opened with	Quay lại cài đặt khi mở hộp thoại
+	Blue Primary	Màu chính Lam
+	Calibration	Hiệu chuẩn
+	Green Primary	Màu chính Lục
+	Parametric	Tham số
+	Preview not updated	Bản xem trước chưa được cập nhật
+	Red Primary	Màu chính Đỏ
+	Reset {section}	Đặt lại {section}
+	Shadows Tint	Sắc độ vùng tối
+	White Balance	Cân bằng trắng
+	White Balance Tool (I)	Công cụ Cân bằng trắng (I)
+	Shadows / Darks split	Ranh giới Vùng tối / Vùng tối vừa
+	Darks / Lights split	Ranh giới Vùng tối vừa / Vùng sáng vừa
+	Lights / Highlights split	Ranh giới Vùng sáng vừa / Vùng sáng
+	Black & White (V)	Đen & Trắng (V)
+	draft	bản nháp
+	Camera Raw preview failed; the previous preview remains	Bản xem trước Camera Raw bị lỗi; vẫn giữ bản xem trước trước đó
+	Camera Raw preview worker stopped	Tiến trình xem trước Camera Raw đã dừng
+	Cannot start the Camera Raw preview worker	Không thể khởi động tiến trình xem trước Camera Raw

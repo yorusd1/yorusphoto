@@ -20,7 +20,7 @@
 //! - Colour: the clipping directions act on each channel, the compressing ones scale the pixel
 //!   by the curve's change of its luminance (closest to Photoshop on saturated colours).
 
-use super::Encoding;
+use super::transfer::{LightCurve, Lut};
 use crate::photo_util::par_rows;
 
 /// Grey levels the curves are sampled at: 0, 1/32, …, 1 (sRGB-encoded).
@@ -352,8 +352,8 @@ pub(crate) fn amounts(whites: f32, blacks: f32, bp: f32, wp: f32) -> (f32, f32) 
 }
 
 /// Applies Whites and Blacks (internal amounts `w`, `b`) to straight RGBA pixels (`width` per
-/// row) encoded with `enc`. Values above 1 (float documents) keep their excess.
-pub(crate) fn apply(px: &mut [[f32; 4]], width: usize, w: f32, b: f32, enc: Encoding) {
+/// row) encoded as `lut` describes. Values above 1 (float documents) keep their excess.
+pub(crate) fn apply(px: &mut [[f32; 4]], width: usize, w: f32, b: f32, lut: &Lut) {
     if w == 0.0 && b == 0.0 {
         return;
     }
@@ -362,24 +362,26 @@ pub(crate) fn apply(px: &mut [[f32; 4]], width: usize, w: f32, b: f32, enc: Enco
         let v = if w != 0.0 { whites(v, w) } else { v };
         if b != 0.0 { blacks(v, b) } else { v }
     };
+    // The same curve on light, tabulated once rather than encoded and decoded per pixel.
+    let curve = LightCurve::new(|y| super::srgb_decode(grey(super::srgb_encode(y))));
     let per_channel = w > 0.0 || b < 0.0;
     par_rows(px, width, 1, |_, row| {
         for q in row.iter_mut() {
-            let lin = [0, 1, 2].map(|c| enc.decode(q[c]));
+            let lin = [0, 1, 2].map(|c| lut.decode(q[c]));
             if per_channel {
                 for c in 0..3 {
                     let over = (lin[c] - 1.0).max(0.0);
-                    q[c] = enc.encode(super::srgb_decode(grey(super::srgb_encode(lin[c].min(1.0)))) + over);
+                    q[c] = lut.encode(curve.at(lin[c].min(1.0)) + over);
                 }
             } else {
                 let y = super::luma_linear(lin).max(0.0);
                 if y <= 1e-7 {
                     continue;
                 }
-                let y2 = super::srgb_decode(grey(super::srgb_encode(y.min(1.0)))) + (y - 1.0).max(0.0);
+                let y2 = curve.at(y.min(1.0)) + (y - 1.0).max(0.0);
                 let k = y2 / y;
                 for c in 0..3 {
-                    q[c] = enc.encode(lin[c] * k);
+                    q[c] = lut.encode(lin[c] * k);
                 }
             }
         }

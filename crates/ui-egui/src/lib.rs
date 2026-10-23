@@ -38,6 +38,7 @@ pub mod brushes_tab;
 mod cam_transform;
 mod camera_raw_detail_ui;
 mod camera_raw_preview_ui;
+mod camera_raw_render;
 mod camera_raw_scope_ui;
 pub mod camera_raw_ui;
 pub mod canvas;

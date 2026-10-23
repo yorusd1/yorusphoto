@@ -3012,3 +3012,28 @@ curves	Smooth	Сгладить
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 канала
+	As Shot	Как снято
+	Auto tone (Ctrl+Shift+U)	Автотон (Ctrl+Shift+U)
+	B&W Mix	Микширование Ч/Б
+	Back to the settings the dialog opened with	Вернуть настройки, с которыми открылось окно
+	Blue Primary	Синий основной
+	Calibration	Калибровка
+	draft	черновик
+	Green Primary	Зелёный основной
+	Parametric	Параметрическая
+	Preview not updated	Просмотр не обновлён
+	Red Primary	Красный основной
+	Reset {section}	Сбросить: {section}
+	Shadows Tint	Оттенок теней
+	White Balance	Баланс белого
+	White Balance Tool (I)	Инструмент «Баланс белого» (I)
+	Shadows / Darks split	Граница Тени / Тёмные тона
+	Darks / Lights split	Граница Тёмные тона / Светлые тона
+	Lights / Highlights split	Граница Светлые тона / Света
+	Black & White (V)	Чёрно-белое (V)
+	Camera Raw preview failed; the previous preview remains	Не удалось обновить просмотр Camera Raw; остаётся предыдущий просмотр
+	Camera Raw preview worker stopped	Процесс просмотра Camera Raw остановлен
+	Cannot start the Camera Raw preview worker	Не удаётся запустить процесс просмотра Camera Raw

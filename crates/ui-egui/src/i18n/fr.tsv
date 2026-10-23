@@ -3068,3 +3068,28 @@ curves	Smooth	Lisser
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 voies
+	As Shot	Telle quelle
+	Auto tone (Ctrl+Shift+U)	Tons automatiques (Ctrl+Maj+U)
+	B&W Mix	Mélange N&B
+	Back to the settings the dialog opened with	Revenir aux paramètres d'ouverture de la boîte de dialogue
+	Blue Primary	Primaire bleue
+	Calibration	Étalonnage
+	draft	brouillon
+	Green Primary	Primaire verte
+	Parametric	Paramétrique
+	Preview not updated	Aperçu non mis à jour
+	Red Primary	Primaire rouge
+	Reset {section}	Réinitialiser {section}
+	Shadows Tint	Teinte des ombres
+	White Balance	Balance des blancs
+	White Balance Tool (I)	Outil Balance des blancs (I)
+	Shadows / Darks split	Séparation Ombres / Tons sombres
+	Darks / Lights split	Séparation Tons sombres / Tons clairs
+	Lights / Highlights split	Séparation Tons clairs / Hautes lumières
+	Black & White (V)	Noir et blanc (V)
+	Camera Raw preview failed; the previous preview remains	Échec de l'aperçu Camera Raw ; l'aperçu précédent est conservé
+	Camera Raw preview worker stopped	Le processus d'aperçu Camera Raw s'est arrêté
+	Cannot start the Camera Raw preview worker	Impossible de démarrer le processus d'aperçu Camera Raw

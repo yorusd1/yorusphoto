@@ -17,8 +17,17 @@ develop pipeline. Automation fields are in [control-protocol.md](control-protoco
 | Floating scopes | Resizable panel; drag it back onto the dock to restore |
 | Preferences | Display options and panel geometry persist in `dialogs["filter.cameraRaw.scope"]`; probes and vectorscope visibility do not |
 
-The settings panel is grouped as Light, Color, Effects, Curve, Color Mixer, Color Grading and
-Detail, with the existing filter parameters and processing. The point Curve shares its editing
+The settings panel is grouped as Light, Color, Effects, Curve, Color Mixer (B&W Mix in Black &
+White), Color Grading, Detail and Calibration, under a Color / Black & White treatment switch and
+an **Auto** button (Ctrl+Shift+U: Exposure, Contrast, Highlights, Shadows, Whites and Blacks from
+the image's statistics). White Balance offers As Shot, Auto and Custom and the White Balance tool
+(I: a click makes the 5 × 5 average under it neutral). The Curve edits the RGB, Red, Green or
+Blue point curve plus the parametric regions and their splits; Color Grading shows the three
+ranges as hue/saturation wheels or one range (or Global) in detail. Double-clicking a slider
+restores that control's own default; a section header's context menu resets the section, and
+Reset returns to the settings the dialog opened with. V toggles Black & White. Auto, the White
+Balance solve, B&W Mix and Calibration are our own heuristics and approximations of the documented
+behaviour. The point Curve shares its editing
 model with Image › Adjustments › Curves and layer Properties (`point_curve.rs`): button-down hit
 testing, grab offsets, ordered points, endpoint protection, drag-off removal and re-entry,
 keyboard nudges and deletion, at most 16 points. Camera Raw commits one `filter.cameraRaw` edit on
@@ -82,6 +91,24 @@ and `rgb_histogram.rs`. No engine commands or document fields were added.
 
 `camera_raw_bench` times the CPU path on a 36 MP layer (P31: develop + histogram; P36: all SDR
 scopes, probes, hover and tessellation). GPU upload and presentation are not included.
+
+## Responsiveness
+
+- The interactive preview develops off the UI thread (`camera_raw_render.rs`): one render at a
+  time, and the next starts with the newest settings when it lands, so the UI never waits and
+  never queues behind old values. While a control is dragged a draft develops a half-size proxy
+  and scales it up; releasing the control renders the full proxy. The control channel still
+  renders synchronously, so automation sees deterministic results.
+- `camera_raw::Developer` keeps the tone stages' result (White Balance, Dehaze, Highlights /
+  Shadows, Contrast, Clarity, Texture, Whites / Blacks) and the colour + detail result, so
+  colour, detail and effects controls do not redo the tone stages. A per-setting test checks the
+  cache against a fresh develop.
+- Highlights / Shadows (local Laplacian filter) evaluates each pyramid coefficient only for the
+  two references that bracket it (about 41 ms instead of 1 s on a 900 × 600 proxy); output matches the previous implementation within 2.3 × 10⁻⁵.
+  Transfer curves are tabulated (`transfer.rs`, within 2 × 10⁻⁶ of the exact curves).
+- `cargo run --release -p photocraft-algo --example camera_raw_stages` times each control on a
+  900 × 600 proxy. On a 24-thread machine a typical edit (all Light sliders, Clarity, Vibrance,
+  HSL, sharpening) went from about 2 s to about 0.1 s per change.
 
 ## Not covered
 

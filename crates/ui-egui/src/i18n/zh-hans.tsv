@@ -2672,3 +2672,29 @@ curves	Smooth	平滑
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	三向
+	As Shot	原照设置
+	Auto tone (Ctrl+Shift+U)	自动色调 (Ctrl+Shift+U)
+	B&W Mix	黑白混合
+	Back to the settings the dialog opened with	恢复到打开对话框时的设置
+	Blue Primary	蓝原色
+	Calibration	校准
+	draft	草稿
+	Green Primary	绿原色
+	Parametric	参数
+	Preview not updated	预览未更新
+	Red Primary	红原色
+	Reset {section}	复位{section}
+	RGB	RGB
+	Shadows Tint	阴影色调
+	White Balance	白平衡
+	White Balance Tool (I)	白平衡工具 (I)
+	Shadows / Darks split	阴影 / 暗调 分界
+	Darks / Lights split	暗调 / 亮调 分界
+	Lights / Highlights split	亮调 / 高光 分界
+	Black & White (V)	黑白 (V)
+	Camera Raw preview failed; the previous preview remains	Camera Raw 预览失败；保留之前的预览
+	Camera Raw preview worker stopped	Camera Raw 预览进程已停止
+	Cannot start the Camera Raw preview worker	无法启动 Camera Raw 预览进程

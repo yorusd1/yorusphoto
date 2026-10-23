@@ -3055,3 +3055,28 @@ curves	Smooth	Haluskan
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 Arah
+	As Shot	Sesuai Jepretan
+	Auto tone (Ctrl+Shift+U)	Nada otomatis (Ctrl+Shift+U)
+	B&W Mix	Campuran H&P
+	Back to the settings the dialog opened with	Kembali ke pengaturan saat dialog dibuka
+	Blue Primary	Primer Biru
+	Calibration	Kalibrasi
+	draft	draf
+	Green Primary	Primer Hijau
+	Parametric	Parametrik
+	Preview not updated	Pratinjau tidak diperbarui
+	Red Primary	Primer Merah
+	Reset {section}	Atur ulang {section}
+	Shadows Tint	Rona Bayangan
+	White Balance	Keseimbangan Putih
+	White Balance Tool (I)	Alat Keseimbangan Putih (I)
+	Shadows / Darks split	Batas Bayangan / Nada Gelap
+	Darks / Lights split	Batas Nada Gelap / Nada Terang
+	Lights / Highlights split	Batas Nada Terang / Highlight
+	Black & White (V)	Hitam & Putih (V)
+	Camera Raw preview failed; the previous preview remains	Pratinjau Camera Raw gagal; pratinjau sebelumnya tetap ditampilkan
+	Camera Raw preview worker stopped	Proses pratinjau Camera Raw berhenti
+	Cannot start the Camera Raw preview worker	Tidak dapat memulai proses pratinjau Camera Raw

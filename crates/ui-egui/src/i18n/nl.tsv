@@ -3826,3 +3826,28 @@ curves	Smooth	Vloeiend maken
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3-weg
+	As Shot	Zoals opgenomen
+	Auto tone (Ctrl+Shift+U)	Automatische toon (Ctrl+Shift+U)
+	B&W Mix	Z&W-mix
+	Back to the settings the dialog opened with	Terug naar de instellingen waarmee het dialoogvenster werd geopend
+	Blue Primary	Blauwe primaire kleur
+	Calibration	Kalibratie
+	Green Primary	Groene primaire kleur
+	Parametric	Parametrisch
+	Preview not updated	Voorvertoning niet bijgewerkt
+	Red Primary	Rode primaire kleur
+	Reset {section}	{section} herstellen
+	Shadows Tint	Schaduwtint
+	White Balance	Witbalans
+	White Balance Tool (I)	Gereedschap Witbalans (I)
+	Shadows / Darks split	Splitsing Schaduwen / Donkere tinten
+	Darks / Lights split	Splitsing Donkere tinten / Lichte tinten
+	Lights / Highlights split	Splitsing Lichte tinten / Hooglichten
+	Black & White (V)	Zwart-wit (V)
+	draft	concept
+	Camera Raw preview failed; the previous preview remains	Camera Raw-voorvertoning mislukt; de vorige voorvertoning blijft staan
+	Camera Raw preview worker stopped	Het voorvertoningsproces van Camera Raw is gestopt
+	Cannot start the Camera Raw preview worker	Kan het voorvertoningsproces van Camera Raw niet starten

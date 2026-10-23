@@ -92,6 +92,20 @@ Use the **Assistant** tab to describe an editing task. Codex can inspect the liv
 
 The underlying supported integration is the [Codex app-server](https://learn.chatgpt.com/docs/app-server). Image-generation behavior is documented in [ChatGPT image generation](https://learn.chatgpt.com/docs/image-generation).
 
+## Camera Raw (v8)
+
+Filter › Camera Raw Filter no longer lags while you move sliders. The preview develops in the
+background, shows a quicker half-size draft while you drag and the full preview when you let go,
+and colour, detail and effects sliders reuse the tone work already done. On a 900 × 600 preview a
+typical edit went from about 2 s to about 0.1 s per change.
+
+New controls: **Auto** (Ctrl+Shift+U), White Balance As Shot / Auto / Custom and the White Balance
+tool (I), RGB / Red / Green / Blue point curves and region splits, colour-grading wheels,
+**Black & White** (V) with a B&W Mix, and a Calibration panel. Double-clicking a slider restores
+that control's own default; right-click a section header to reset the section. Black & White and
+Calibration have no verified PSD mapping yet, so a filter using them is not written to PSD.
+Details: [Camera Raw notes](camera-raw-histogram.md).
+
 ## YorusAi Direct image tools
 
 The v7 update fixes Direct GPT Image **Auto** sizing to follow the captured selection or

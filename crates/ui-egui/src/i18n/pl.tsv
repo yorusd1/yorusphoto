@@ -3663,3 +3663,28 @@ curves	Smooth	Wygładź
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3-kierunkowe
+	As Shot	Jak zarejestrowano
+	Auto tone (Ctrl+Shift+U)	Automatyczny ton (Ctrl+Shift+U)
+	B&W Mix	Mieszanie cz-b
+	Back to the settings the dialog opened with	Powrót do ustawień z chwili otwarcia okna
+	Blue Primary	Kolor podstawowy niebieski
+	Calibration	Kalibracja
+	Green Primary	Kolor podstawowy zielony
+	Parametric	Parametryczna
+	Preview not updated	Podgląd nie został zaktualizowany
+	Red Primary	Kolor podstawowy czerwony
+	Reset {section}	Resetuj: {section}
+	Shadows Tint	Odcień cieni
+	White Balance	Balans bieli
+	White Balance Tool (I)	Narzędzie Balans bieli (I)
+	Shadows / Darks split	Podział Cienie / Ciemne tony
+	Darks / Lights split	Podział Ciemne tony / Jasne tony
+	Lights / Highlights split	Podział Jasne tony / Światła
+	Black & White (V)	Czerń i biel (V)
+	draft	szkic
+	Camera Raw preview failed; the previous preview remains	Podgląd Camera Raw nie powiódł się; pozostaje poprzedni podgląd
+	Camera Raw preview worker stopped	Proces podglądu Camera Raw został zatrzymany
+	Cannot start the Camera Raw preview worker	Nie można uruchomić procesu podglądu Camera Raw

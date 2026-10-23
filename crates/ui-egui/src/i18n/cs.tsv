@@ -3674,3 +3674,28 @@ navigator	Zoom	Zvětšení
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3cestné
+	As Shot	Jako snímek
+	Auto tone (Ctrl+Shift+U)	Automatický tón (Ctrl+Shift+U)
+	B&W Mix	Černobílá směs
+	Back to the settings the dialog opened with	Zpět na nastavení při otevření dialogu
+	Blue Primary	Modrá primární
+	Calibration	Kalibrace
+	Green Primary	Zelená primární
+	Parametric	Parametrická
+	Preview not updated	Náhled nebyl aktualizován
+	Red Primary	Červená primární
+	Reset {section}	Obnovit: {section}
+	Shadows Tint	Odstín stínů
+	White Balance	Vyvážení bílé
+	White Balance Tool (I)	Nástroj Vyvážení bílé (I)
+	Shadows / Darks split	Rozdělení Stíny / Tmavé tóny
+	Darks / Lights split	Rozdělení Tmavé tóny / Světlé tóny
+	Lights / Highlights split	Rozdělení Světlé tóny / Světla
+	Black & White (V)	Černobílá (V)
+	draft	koncept
+	Camera Raw preview failed; the previous preview remains	Náhled Camera Raw selhal; zůstává předchozí náhled
+	Camera Raw preview worker stopped	Proces náhledu Camera Raw se zastavil
+	Cannot start the Camera Raw preview worker	Proces náhledu Camera Raw nelze spustit

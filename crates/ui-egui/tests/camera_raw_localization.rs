@@ -35,7 +35,7 @@ fn all_seven_languages_render_camera_raw_and_switch_without_resetting_view_or_fi
         h.run_steps(12);
         h.get_by_role_and_label(Role::Button, tr("Color")).click();
         h.run_steps(12);
-        for label in ["White Balance: As Shot", "Temperature", "Tint", "Vibrance", "Saturation"] {
+        for label in ["White Balance", "Temperature", "Tint", "Vibrance", "Saturation"] {
             assert!(h.query_by_label(tr(label)).is_some(), "{}: {label}", lang.code());
         }
         h.get_by_role_and_label(Role::Button, tr("Color")).click();
@@ -53,7 +53,8 @@ fn all_seven_languages_render_camera_raw_and_switch_without_resetting_view_or_fi
         for (section, labels) in [
             ("Effects", vec!["Texture", "Clarity", "Dehaze", "Vignetting", "Grain", "Roughness"]),
             ("Curve", vec!["Highlights", "Lights", "Darks", "Shadows"]),
-            ("Color Grading", vec!["Midtones", "Global", "Hue", "Saturation", "Luminance", "Blending", "Balance"]),
+            ("Color Grading", vec!["3-Way", "Midtones", "Global", "Luminance", "Blending", "Balance"]),
+            ("Calibration", vec!["Shadows Tint", "Red Primary", "Green Primary", "Blue Primary", "Hue", "Saturation"]),
             ("Detail", vec!["Sharpening", "Masking", "Noise Reduction", "Luminance Detail", "Color Detail"]),
         ] {
             h.get_by_role_and_label(Role::Button, tr(section)).click();

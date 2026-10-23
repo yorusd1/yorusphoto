@@ -55,8 +55,13 @@ pub fn validate_curve(points: &[[f32; 2]]) -> Result<(), String> {
 
 use crate::photo_util::{hash01, linear_to_srgb, par_rows, srgb_to_linear};
 
+mod auto;
 mod local_tone;
+mod transfer;
 mod whites_blacks;
+
+pub use auto::{auto_tone, auto_white_balance, neutral_white_balance};
+use transfer::Lut;
 
 /// How the pixels encode light: the sRGB curve (gamma 0) or a pure power law (ProPhoto's 1.8,
 /// Adobe RGB's 2.2). The tone controls work on light, so the document's own curve decodes it.
@@ -146,6 +151,20 @@ pub struct CameraRaw {
     pub grade_global: Wheel,
     pub grade_blending: f32,
     pub grade_balance: f32,
+    /// Treatment: Black & White develops to grey through [`bw_mix`](Self::bw_mix) (Vibrance,
+    /// Saturation and the HSL mixer then have no effect; Color Grading still tints).
+    pub black_and_white: bool,
+    /// B&W Mix per Color Mixer band (−100 … 100): how light each colour turns in grey.
+    pub bw_mix: [f32; 8],
+    // Calibration (−100 … 100): the shadows' green–magenta tint and each primary's hue and
+    // saturation, applied in linear light before the colour stages.
+    pub calibration_shadows_tint: f32,
+    pub calibration_red_hue: f32,
+    pub calibration_red_sat: f32,
+    pub calibration_green_hue: f32,
+    pub calibration_green_sat: f32,
+    pub calibration_blue_hue: f32,
+    pub calibration_blue_sat: f32,
     // Detail
     pub sharpen_amount: f32,
     pub sharpen_radius: f32,
@@ -208,6 +227,15 @@ impl Default for CameraRaw {
             grade_global: Wheel::default(),
             grade_blending: 50.0,
             grade_balance: 0.0,
+            black_and_white: false,
+            bw_mix: [0.0; 8],
+            calibration_shadows_tint: 0.0,
+            calibration_red_hue: 0.0,
+            calibration_red_sat: 0.0,
+            calibration_green_hue: 0.0,
+            calibration_green_sat: 0.0,
+            calibration_blue_hue: 0.0,
+            calibration_blue_sat: 0.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
             sharpen_detail: 25.0,
@@ -540,6 +568,29 @@ impl CameraRaw {
     fn grade_neutral(&self) -> bool {
         self.grade_shadows.neutral() && self.grade_midtones.neutral() && self.grade_highlights.neutral() && self.grade_global.neutral()
     }
+    fn calibration_neutral(&self) -> bool {
+        [
+            self.calibration_shadows_tint,
+            self.calibration_red_hue,
+            self.calibration_red_sat,
+            self.calibration_green_hue,
+            self.calibration_green_sat,
+            self.calibration_blue_hue,
+            self.calibration_blue_sat,
+        ]
+        .iter()
+        .all(|v| *v == 0.0)
+    }
+    /// The per-pixel colour stages (4–7) change nothing.
+    fn color_neutral(&self) -> bool {
+        !self.black_and_white
+            && self.vibrance == 0.0
+            && self.saturation == 0.0
+            && self.curves_neutral()
+            && self.hsl_neutral()
+            && self.grade_neutral()
+            && self.calibration_neutral()
+    }
     fn curves_neutral(&self) -> bool {
         [self.curve_highlights, self.curve_lights, self.curve_darks, self.curve_shadows].iter().all(|v| *v == 0.0)
             && [&self.point_curve, &self.point_curve_red, &self.point_curve_green, &self.point_curve_blue].iter().all(|c| is_linear(c))
@@ -549,11 +600,7 @@ impl CameraRaw {
         self.wb_neutral()
             && self.tone_neutral()
             && self.dehaze == 0.0
-            && self.vibrance == 0.0
-            && self.saturation == 0.0
-            && self.curves_neutral()
-            && self.hsl_neutral()
-            && self.grade_neutral()
+            && self.color_neutral()
             && self.sharpen_amount == 0.0
             && self.noise_luminance == 0.0
             && self.noise_color == 0.0
@@ -578,11 +625,121 @@ pub fn white_balance_gains(temperature: f32, tint: f32) -> [f32; 3] {
 }
 
 /// Runs the Camera Raw pipeline on straight RGBA pixels (`w × h`, display-encoded RGB).
-/// `float` keeps values above 1 (32-bit documents).
+/// `float` keeps values above 1 (32-bit documents). A buffer that is not `w × h` is left as is.
 pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bool) {
-    if px.is_empty() || p.is_identity() {
+    if px.is_empty() || px.len() != w.saturating_mul(h) || p.is_identity() {
         return;
     }
+    tone_stage(px, w, h, p);
+    color_stage(px, w, p);
+    detail_stage(px, w, h, p);
+    effects_stage(px, w, h, p, float);
+}
+
+/// Develops one source again and again (an interactive preview), keeping what the expensive
+/// stages made: moving a colour or detail control does not redo White Balance, Dehaze,
+/// Highlights / Shadows, Contrast, Clarity, Texture or Whites / Blacks, and moving an effects
+/// control redoes only the effects. The result is exactly [`develop`]'s.
+#[derive(Default)]
+pub struct Developer {
+    source: u64,
+    /// Stages 1–3's output and the settings it was made with ([`tone_key`]).
+    tone: Option<(CameraRaw, Vec<[f32; 4]>)>,
+    /// Stages 4–8's output on `tone` ([`finish_key`]).
+    finish: Option<(CameraRaw, Vec<[f32; 4]>)>,
+}
+
+impl Developer {
+    /// `src` developed with `p`. `source` identifies the pixels: another value (or size) drops
+    /// what was kept.
+    pub fn develop(&mut self, src: &[[f32; 4]], source: u64, w: usize, h: usize, p: &CameraRaw, float: bool) -> Vec<[f32; 4]> {
+        if self.source != source || self.tone.as_ref().is_some_and(|(_, t)| t.len() != src.len()) {
+            *self = Developer { source, ..Default::default() };
+        }
+        if src.is_empty() || src.len() != w.saturating_mul(h) || p.is_identity() {
+            return src.to_vec();
+        }
+        let key = tone_key(p);
+        let tone = match self.tone.take() {
+            Some((k, px)) if k == key => px,
+            _ => {
+                self.finish = None;
+                let mut px = src.to_vec();
+                tone_stage(&mut px, w, h, p);
+                px
+            }
+        };
+        let finish_settings = finish_key(p);
+        let finish = match self.finish.take() {
+            Some((k, px)) if k == finish_settings => px,
+            _ => {
+                let mut px = tone.clone();
+                color_stage(&mut px, w, p);
+                detail_stage(&mut px, w, h, p);
+                px
+            }
+        };
+        let mut out = finish.clone();
+        effects_stage(&mut out, w, h, p, float);
+        self.tone = Some((key, tone));
+        self.finish = Some((finish_settings, finish));
+        out
+    }
+}
+
+/// The settings stages 1–3 read.
+fn tone_key(p: &CameraRaw) -> CameraRaw {
+    CameraRaw {
+        temperature: p.temperature,
+        tint: p.tint,
+        exposure: p.exposure,
+        contrast: p.contrast,
+        highlights: p.highlights,
+        shadows: p.shadows,
+        whites: p.whites,
+        blacks: p.blacks,
+        texture: p.texture,
+        clarity: p.clarity,
+        dehaze: p.dehaze,
+        pixel_scale: p.pixel_scale,
+        encoding_gamma: p.encoding_gamma,
+        ..CameraRaw::default()
+    }
+}
+
+/// The settings stages 4–8 read: all but the tone and effects controls (a new control is part of
+/// this key until it is placed elsewhere, so it can never leave a stale result).
+fn finish_key(p: &CameraRaw) -> CameraRaw {
+    let d = CameraRaw::default();
+    CameraRaw {
+        temperature: d.temperature,
+        tint: d.tint,
+        exposure: d.exposure,
+        contrast: d.contrast,
+        highlights: d.highlights,
+        shadows: d.shadows,
+        whites: d.whites,
+        blacks: d.blacks,
+        texture: d.texture,
+        clarity: d.clarity,
+        dehaze: d.dehaze,
+        grain_amount: d.grain_amount,
+        grain_size: d.grain_size,
+        grain_roughness: d.grain_roughness,
+        vignette_amount: d.vignette_amount,
+        vignette_midpoint: d.vignette_midpoint,
+        vignette_roundness: d.vignette_roundness,
+        vignette_feather: d.vignette_feather,
+        vignette_highlights: d.vignette_highlights,
+        vignette_style: d.vignette_style,
+        seed: d.seed,
+        ..p.clone()
+    }
+}
+
+/// Stages 1–3: White Balance and Exposure, Dehaze, Highlights / Shadows, Contrast, Clarity and
+/// Texture, Whites / Blacks.
+fn tone_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
     let ps = p.pixel_scale.clamp(0.01, 1.0);
     let long = w.max(h) as f32;
     // 1. White balance + exposure in linear light.
@@ -590,10 +747,11 @@ pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bo
         let mut g = white_balance_gains(p.temperature, p.tint);
         let norm = luma(g);
         g = g.map(|v| v / norm * 2f32.powf(p.exposure));
+        let srgb = Lut::srgb();
         par_rows(px, w, 1, |_, row| {
             for q in row.iter_mut() {
                 for c in 0..3 {
-                    q[c] = linear_to_srgb((srgb_to_linear(q[c]) * g[c]).max(0.0));
+                    q[c] = srgb.encode((srgb.decode(q[c]) * g[c]).max(0.0));
                 }
             }
         });
@@ -639,101 +797,167 @@ pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bo
     }
     // 3b. Whites and Blacks: global curves adapted to the image's black and white points.
     if p.whites != 0.0 || p.blacks != 0.0 {
-        let enc = Encoding::of(p.encoding_gamma);
-        let (bp, wp) = luminance_points(px, w, h, enc);
+        let lut = Lut::of(Encoding::of(p.encoding_gamma));
+        let (bp, wp) = luminance_points(px, w, h, &lut);
         let (xw, xb) = whites_blacks::amounts(p.whites.clamp(-100.0, 100.0), p.blacks.clamp(-100.0, 100.0), bp, wp);
-        whites_blacks::apply(px, w, xw, xb, enc);
+        whites_blacks::apply(px, w, xw, xb, &lut);
     }
-    // 4–7: per-pixel colour stages.
-    let need_color = p.vibrance != 0.0 || p.saturation != 0.0 || !p.curves_neutral() || !p.hsl_neutral() || !p.grade_neutral();
-    if need_color {
-        let par = (!(p.curve_highlights == 0.0 && p.curve_lights == 0.0 && p.curve_darks == 0.0 && p.curve_shadows == 0.0)).then(|| parametric_lut(p, 1024));
-        let pts = |c: &Vec<[f32; 2]>| (!is_linear(c)).then(|| curve_lut(c, 1024));
-        let (master, cr, cg, cb) = (pts(&p.point_curve), pts(&p.point_curve_red), pts(&p.point_curve_green), pts(&p.point_curve_blue));
-        let hsl = !p.hsl_neutral();
-        let grade = !p.grade_neutral();
-        let wheel_tint = |wh: &Wheel| -> [f32; 3] {
-            let c = hsv_to_rgb(wh.hue, 1.0, 1.0);
-            let l = luma(c);
-            [c[0] - l, c[1] - l, c[2] - l].map(|v| v * wh.sat / 100.0 * 0.3)
-        };
-        let tints = [wheel_tint(&p.grade_shadows), wheel_tint(&p.grade_midtones), wheel_tint(&p.grade_highlights), wheel_tint(&p.grade_global)];
-        let blend = 0.15 + p.grade_blending.clamp(0.0, 100.0) / 100.0 * 0.35;
-        let bal = p.grade_balance.clamp(-100.0, 100.0) / 100.0 * 0.25;
-        par_rows(px, w, 1, |_, row| {
-            for q in row.iter_mut() {
-                let mut c = [q[0], q[1], q[2]];
-                if p.vibrance != 0.0 || p.saturation != 0.0 {
-                    let l = luma(c);
-                    let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
-                    let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
-                    // Vibrance protects skin-ish hues (oranges) a little, like ACR.
-                    let hue = rgb_to_hsv(c)[0];
-                    let skin = (1.0 - ((hue - 25.0).abs() / 25.0)).clamp(0.0, 1.0) * 0.5;
-                    let k = 1.0 + p.saturation / 100.0 + p.vibrance / 100.0 * (1.0 - sat) * (1.0 - skin);
-                    c = c.map(|v| l + (v - l) * k.max(0.0));
+}
+
+/// Calibration's primaries as a matrix on linear RGB: each primary turned about the grey axis
+/// (Hue, up to ±40°) and its chroma scaled (Saturation), the rows then normalized so neutral
+/// colours stay neutral.
+fn calibration_matrix(p: &CameraRaw) -> [[f32; 3]; 3] {
+    let hue = [p.calibration_red_hue, p.calibration_green_hue, p.calibration_blue_hue];
+    let sat = [p.calibration_red_sat, p.calibration_green_sat, p.calibration_blue_sat];
+    let a = 1.0 / 3f32.sqrt();
+    let mut m = [[0.0f32; 3]; 3];
+    for k in 0..3 {
+        let theta = (hue[k].clamp(-100.0, 100.0) / 100.0 * 40.0).to_radians();
+        let s = 1.0 + sat[k].clamp(-100.0, 100.0) / 100.0 * 0.8;
+        let mut e = [0.0f32; 3];
+        e[k] = 1.0;
+        // Rodrigues' rotation about the unit grey axis (a, a, a); a primary's projection on it
+        // is a third of white.
+        let cross = [a * (e[2] - e[1]), a * (e[0] - e[2]), a * (e[1] - e[0])];
+        let (cs, sn) = (theta.cos(), theta.sin());
+        for i in 0..3 {
+            let turned = e[i] * cs + cross[i] * sn + (1.0 - cs) / 3.0;
+            m[i][k] = 1.0 / 3.0 + (turned - 1.0 / 3.0) * s;
+        }
+    }
+    for row in m.iter_mut() {
+        let sum: f32 = row.iter().sum();
+        if sum.abs() > 1e-3 {
+            row.iter_mut().for_each(|v| *v /= sum);
+        }
+    }
+    m
+}
+
+/// Stages 4–7, per pixel: Calibration, Vibrance / Saturation, the tone curves, the Color Mixer
+/// (or the B&W Mix) and Color Grading.
+fn color_stage(px: &mut [[f32; 4]], w: usize, p: &CameraRaw) {
+    if p.color_neutral() {
+        return;
+    }
+    let calibration = (!p.calibration_neutral()).then(|| (calibration_matrix(p), Lut::of(Encoding::of(p.encoding_gamma))));
+    let shadows_tint = p.calibration_shadows_tint.clamp(-100.0, 100.0) / 100.0;
+    let bw = p.black_and_white;
+    let bw_mix = p.bw_mix.map(|v| v.clamp(-100.0, 100.0));
+    let presence = !bw && (p.vibrance != 0.0 || p.saturation != 0.0);
+    let par = (!(p.curve_highlights == 0.0 && p.curve_lights == 0.0 && p.curve_darks == 0.0 && p.curve_shadows == 0.0)).then(|| parametric_lut(p, 1024));
+    let pts = |c: &Vec<[f32; 2]>| (!is_linear(c)).then(|| curve_lut(c, 1024));
+    let (master, cr, cg, cb) = (pts(&p.point_curve), pts(&p.point_curve_red), pts(&p.point_curve_green), pts(&p.point_curve_blue));
+    let hsl = !bw && !p.hsl_neutral();
+    let grade = !p.grade_neutral();
+    let wheel_tint = |wh: &Wheel| -> [f32; 3] {
+        let c = hsv_to_rgb(wh.hue, 1.0, 1.0);
+        let l = luma(c);
+        [c[0] - l, c[1] - l, c[2] - l].map(|v| v * wh.sat / 100.0 * 0.3)
+    };
+    let tints = [wheel_tint(&p.grade_shadows), wheel_tint(&p.grade_midtones), wheel_tint(&p.grade_highlights), wheel_tint(&p.grade_global)];
+    let blend = 0.15 + p.grade_blending.clamp(0.0, 100.0) / 100.0 * 0.35;
+    let bal = p.grade_balance.clamp(-100.0, 100.0) / 100.0 * 0.25;
+    par_rows(px, w, 1, |_, row| {
+        for q in row.iter_mut() {
+            let mut c = [q[0], q[1], q[2]];
+            if let Some((m, lut)) = &calibration {
+                let l = c.map(|v| lut.decode(v));
+                let mut o = [0, 1, 2].map(|i| m[i][0] * l[0] + m[i][1] * l[1] + m[i][2] * l[2]);
+                if shadows_tint != 0.0 {
+                    // Positive values turn the shadows magenta (less green), negative green.
+                    let wgt = 1.0 - smoothstep(0.0, 0.18, luma(o).clamp(0.0, 1.0));
+                    o[1] *= 2f32.powf(-shadows_tint * 0.35 * wgt);
                 }
-                if let Some(lut) = &par {
-                    c = c.map(|v| lut_eval(lut, v));
-                }
-                if let Some(lut) = &master {
-                    c = c.map(|v| lut_eval(lut, v));
-                }
-                for (ch, lut) in [&cr, &cg, &cb].iter().enumerate() {
-                    if let Some(lut) = lut {
-                        c[ch] = lut_eval(lut, c[ch]);
-                    }
-                }
-                if hsl {
-                    let [hh, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
-                    if s > 1e-4 {
-                        let wts = band_weights(hh);
-                        let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
-                        for k in 0..8 {
-                            dh += wts[k] * p.hsl_hue[k];
-                            ds += wts[k] * p.hsl_sat[k];
-                            dl += wts[k] * p.hsl_lum[k];
-                        }
-                        let nh = hh + dh / 100.0 * 30.0;
-                        let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
-                        let mut out = hsv_to_rgb(nh, ns, v);
-                        // Keep the luminance, then apply the luminance shift weighted by saturation.
-                        let (l0, l1) = (luma(c), luma(out));
-                        if l1 > 1e-6 {
-                            out = out.map(|x| x * l0 / l1);
-                        }
-                        let k = 2f32.powf(dl / 100.0 * 1.0 * s);
-                        c = out.map(|x| x * k);
-                    }
-                }
-                if grade {
-                    let l = luma(c).clamp(0.0, 1.0);
-                    let sh = 1.0 - smoothstep(0.0, 0.5 + bal + blend, l);
-                    let hi = smoothstep(0.5 + bal - blend, 1.0, l);
-                    let mid = (1.0 - sh - hi).max(0.0);
-                    let masks = [sh, mid, hi, 1.0];
-                    let lums = [p.grade_shadows.lum, p.grade_midtones.lum, p.grade_highlights.lum, p.grade_global.lum];
-                    for k in 0..4 {
-                        for ch in 0..3 {
-                            c[ch] += masks[k] * tints[k][ch];
-                        }
-                        if lums[k] != 0.0 {
-                            let f = 2f32.powf(masks[k] * lums[k] / 100.0 * 0.6);
-                            c = c.map(|x| x * f);
-                        }
-                    }
-                }
-                q[0] = c[0];
-                q[1] = c[1];
-                q[2] = c[2];
+                c = o.map(|v| lut.encode(v));
             }
-        });
-    }
-    // 8. Detail.
+            if presence {
+                let l = luma(c);
+                let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+                let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
+                // Vibrance protects skin-ish hues (oranges) a little, like ACR.
+                let hue = rgb_to_hsv(c)[0];
+                let skin = (1.0 - ((hue - 25.0).abs() / 25.0)).clamp(0.0, 1.0) * 0.5;
+                let k = 1.0 + p.saturation / 100.0 + p.vibrance / 100.0 * (1.0 - sat) * (1.0 - skin);
+                c = c.map(|v| l + (v - l) * k.max(0.0));
+            }
+            if let Some(lut) = &par {
+                c = c.map(|v| lut_eval(lut, v));
+            }
+            if let Some(lut) = &master {
+                c = c.map(|v| lut_eval(lut, v));
+            }
+            for (ch, lut) in [&cr, &cg, &cb].iter().enumerate() {
+                if let Some(lut) = lut {
+                    c[ch] = lut_eval(lut, c[ch]);
+                }
+            }
+            if hsl {
+                let [hh, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
+                if s > 1e-4 {
+                    let wts = band_weights(hh);
+                    let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
+                    for k in 0..8 {
+                        dh += wts[k] * p.hsl_hue[k];
+                        ds += wts[k] * p.hsl_sat[k];
+                        dl += wts[k] * p.hsl_lum[k];
+                    }
+                    let nh = hh + dh / 100.0 * 30.0;
+                    let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
+                    let mut out = hsv_to_rgb(nh, ns, v);
+                    // Keep the luminance, then apply the luminance shift weighted by saturation.
+                    let (l0, l1) = (luma(c), luma(out));
+                    if l1 > 1e-6 {
+                        out = out.map(|x| x * l0 / l1);
+                    }
+                    let k = 2f32.powf(dl / 100.0 * 1.0 * s);
+                    c = out.map(|x| x * k);
+                }
+            }
+            if bw {
+                // Grey from the luminance, each hue band lightened or darkened by its B&W Mix in
+                // proportion to the colour's saturation.
+                let [hh, s, _] = rgb_to_hsv(c.map(|x| x.max(0.0)));
+                let wts = band_weights(hh);
+                let dl: f32 = (0..8).map(|k| wts[k] * bw_mix[k]).sum();
+                let g = luma(c) * 2f32.powf(dl / 100.0 * 1.5 * s);
+                c = [g; 3];
+            }
+            if grade {
+                let l = luma(c).clamp(0.0, 1.0);
+                let sh = 1.0 - smoothstep(0.0, 0.5 + bal + blend, l);
+                let hi = smoothstep(0.5 + bal - blend, 1.0, l);
+                let mid = (1.0 - sh - hi).max(0.0);
+                let masks = [sh, mid, hi, 1.0];
+                let lums = [p.grade_shadows.lum, p.grade_midtones.lum, p.grade_highlights.lum, p.grade_global.lum];
+                for k in 0..4 {
+                    for ch in 0..3 {
+                        c[ch] += masks[k] * tints[k][ch];
+                    }
+                    if lums[k] != 0.0 {
+                        let f = 2f32.powf(masks[k] * lums[k] / 100.0 * 0.6);
+                        c = c.map(|x| x * f);
+                    }
+                }
+            }
+            q[0] = c[0];
+            q[1] = c[1];
+            q[2] = c[2];
+        }
+    });
+}
+
+/// Stage 8: sharpening and noise reduction.
+fn detail_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
     if p.noise_luminance > 0.0 || p.noise_color > 0.0 || p.sharpen_amount > 0.0 {
-        detail(px, w, h, p, ps);
+        detail(px, w, h, p, p.pixel_scale.clamp(0.01, 1.0));
     }
-    // 9. Effects.
+}
+
+/// Stage 9: post-crop vignette and grain, then the clamp of integer documents.
+fn effects_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bool) {
+    let ps = p.pixel_scale.clamp(0.01, 1.0);
     if p.vignette_amount != 0.0 {
         vignette(px, w, h, p);
     }
@@ -768,21 +992,24 @@ pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bo
 /// The image's black and white points as sRGB-encoded grey levels: the 3rd percentile of the
 /// luminance and the 99.5th of the brightest channel, on a copy at most 256 pixels across (so a
 /// preview proxy and the full image agree).
-fn luminance_points(px: &[[f32; 4]], w: usize, h: usize, enc: Encoding) -> (f32, f32) {
+fn luminance_points(px: &[[f32; 4]], w: usize, h: usize, lut: &Lut) -> (f32, f32) {
     let f = w.max(h).div_ceil(256).max(1);
     let (sw, sh) = (w.div_ceil(f), h.div_ceil(f));
-    let mut sum = vec![[0.0f64; 4]; sw * sh];
-    for y in 0..h {
-        for x in 0..w {
-            let q = px[y * w + x];
-            let s = &mut sum[(y / f) * sw + x / f];
-            for c in 0..3 {
-                s[c] += f64::from(enc.decode(q[c]).clamp(0.0, 1.0));
+    // Rows of cells in parallel, each summed in the same order as one pass would.
+    let rows = crate::photo_util::par_map(sh, |cy| {
+        let mut sum = vec![[0.0f64; 4]; sw];
+        for y in cy * f..((cy + 1) * f).min(h) {
+            for (x, q) in px.get(y * w..(y + 1) * w).unwrap_or_default().iter().enumerate() {
+                let Some(s) = sum.get_mut(x / f) else { continue };
+                for c in 0..3 {
+                    s[c] += f64::from(lut.decode(q[c]).clamp(0.0, 1.0));
+                }
+                s[3] += 1.0;
             }
-            s[3] += 1.0;
         }
-    }
-    let cells: Vec<[f32; 3]> = sum.iter().filter(|s| s[3] > 0.0).map(|s| [0, 1, 2].map(|c| (s[c] / s[3]) as f32)).collect();
+        sum
+    });
+    let cells: Vec<[f32; 3]> = rows.iter().flatten().filter(|s| s[3] > 0.0).map(|s| [0, 1, 2].map(|c| (s[c] / s[3]) as f32)).collect();
     if cells.is_empty() {
         return (0.0, 1.0);
     }
@@ -1155,5 +1382,136 @@ mod tests {
         let mut a = vec![[2.0f32, 1.5, 0.5, 1.0]; 16];
         develop(&mut a, 4, 4, &CameraRaw { exposure: 0.5, ..Default::default() }, true);
         assert!(a[0][0] > 2.0);
+    }
+
+    #[test]
+    fn mismatched_buffers_are_left_alone() {
+        let mut a = img(4, 4);
+        let b = a.clone();
+        develop(&mut a, 5, 4, &CameraRaw { exposure: 1.0, ..Default::default() }, false);
+        develop(&mut a, usize::MAX, 2, &CameraRaw { exposure: 1.0, ..Default::default() }, false);
+        assert_eq!(a, b);
+        assert_eq!(Developer::default().develop(&b, 0, 3, 3, &CameraRaw { exposure: 1.0, ..Default::default() }, false), b);
+    }
+
+    /// Every setting at a non-default value (one at a time), as JSON.
+    fn each_setting_moved() -> Vec<(String, CameraRaw)> {
+        let base = serde_json::to_value(CameraRaw::default()).unwrap();
+        let mut out = Vec::new();
+        for (key, value) in base.as_object().unwrap() {
+            let moved = match (key.as_str(), value) {
+                ("pixelScale" | "encodingGamma", _) => continue,
+                ("vignetteStyle", _) => serde_json::json!("paintOverlay"),
+                ("blackAndWhite", _) => serde_json::json!(true),
+                ("curveSplits", _) => serde_json::json!([20, 45, 80]),
+                (_, serde_json::Value::Array(a)) if a.len() == 8 => serde_json::json!([30, 30, 30, 30, 30, 30, 30, 30]),
+                (_, serde_json::Value::Array(_)) => serde_json::json!([[0, 20], [255, 235]]),
+                (_, serde_json::Value::Object(_)) => serde_json::json!({"hue": 200, "sat": 40, "lum": 20}),
+                ("seed", _) => serde_json::json!(9),
+                (_, serde_json::Value::Number(n)) => serde_json::json!(n.as_f64().unwrap() + if key == "exposure" { 0.7 } else { 23.0 }),
+                _ => panic!("untested setting {key}"),
+            };
+            // Effects and seed only show with an effect on.
+            let mut j = base.clone();
+            j[key] = moved;
+            if key.starts_with("vignette") || key == "seed" || key.starts_with("grain") {
+                j["vignetteAmount"] = serde_json::json!(-40);
+                j["grainAmount"] = serde_json::json!(30);
+            }
+            if key.starts_with("sharpen") {
+                j["sharpenAmount"] = serde_json::json!(60);
+            }
+            if key.starts_with("noise") {
+                j["noiseLuminance"] = serde_json::json!(40);
+                j["noiseColor"] = serde_json::json!(40);
+            }
+            if key.starts_with("curve") {
+                j["curveShadows"] = serde_json::json!(30);
+            }
+            if key.starts_with("grade") {
+                j["gradeShadows"] = serde_json::json!({"hue": 30, "sat": 50, "lum": 10});
+            }
+            if key == "bwMix" {
+                j["blackAndWhite"] = serde_json::json!(true);
+            }
+            out.push((key.clone(), serde_json::from_value(j).unwrap()));
+        }
+        out
+    }
+
+    #[test]
+    fn the_developer_reuses_stages_and_matches_develop_for_every_setting() {
+        let (w, h) = (40, 30);
+        let src = img(w, h);
+        let fresh = |p: &CameraRaw| {
+            let mut a = src.clone();
+            develop(&mut a, w, h, p, false);
+            a
+        };
+        let warm = CameraRaw { shadows: 40.0, clarity: 20.0, vibrance: 10.0, ..Default::default() };
+        let mut dev = Developer::default();
+        assert_eq!(dev.develop(&src, 1, w, h, &warm, false), fresh(&warm));
+        // Every single change, from a warm cache holding `warm`'s stages, equals a fresh develop:
+        // a setting missing from its stage's key would return a stale result here.
+        for (key, moved) in each_setting_moved() {
+            let p = CameraRaw { shadows: warm.shadows + moved.shadows, clarity: warm.clarity + moved.clarity, ..moved };
+            assert_eq!(dev.develop(&src, 1, w, h, &p, false), fresh(&p), "{key}");
+            assert_eq!(dev.develop(&src, 1, w, h, &warm, false), fresh(&warm), "back from {key}");
+            assert_ne!(fresh(&p), fresh(&warm), "{key} changes the image");
+        }
+        // A new source drops the kept stages.
+        let other: Vec<[f32; 4]> = src.iter().map(|q| [q[2], q[0], q[1], 1.0]).collect();
+        let mut a = other.clone();
+        develop(&mut a, w, h, &warm, false);
+        assert_eq!(dev.develop(&other, 2, w, h, &warm, false), a);
+        assert_eq!(dev.develop(&src, 2, w, h, &CameraRaw::default(), false), src, "identity");
+    }
+
+    #[test]
+    fn black_and_white_and_its_mix() {
+        let (w, h) = (16, 8);
+        let px: Vec<[f32; 4]> = (0..w * h).map(|i| if i % 2 == 0 { [0.8, 0.2, 0.2, 1.0] } else { [0.2, 0.3, 0.8, 1.0] }).collect();
+        let run = |p: CameraRaw| {
+            let mut a = px.clone();
+            develop(&mut a, w, h, &p, false);
+            a
+        };
+        let bw = run(CameraRaw { black_and_white: true, vibrance: 100.0, hsl_sat: [100.0; 8], ..Default::default() });
+        assert!(bw.iter().all(|q| q[0] == q[1] && q[1] == q[2]), "grey, whatever Vibrance and HSL say");
+        let mut mix = [0.0; 8];
+        mix[0] = 100.0;
+        let lighter_reds = run(CameraRaw { black_and_white: true, bw_mix: mix, ..Default::default() });
+        assert!(lighter_reds[0][0] > bw[0][0] + 0.1, "reds lighter: {} vs {}", lighter_reds[0][0], bw[0][0]);
+        assert!((lighter_reds[1][0] - bw[1][0]).abs() < 1e-4, "blues untouched");
+        // Grading still tints a black-and-white image (split toning).
+        let toned = run(CameraRaw { black_and_white: true, grade_shadows: Wheel { hue: 220.0, sat: 80.0, lum: 0.0 }, ..Default::default() });
+        assert!(toned[1][2] > toned[1][0]);
+        // The mix alone (Color treatment) does nothing.
+        assert_eq!(run(CameraRaw { bw_mix: mix, ..Default::default() }), px);
+    }
+
+    #[test]
+    fn calibration_turns_primaries_and_keeps_neutrals() {
+        let neutral = CameraRaw { calibration_red_hue: 60.0, calibration_green_sat: -50.0, calibration_blue_hue: -40.0, ..Default::default() };
+        let mut greys: Vec<[f32; 4]> = (0..16).map(|i| [i as f32 / 15.0; 4]).map(|q| [q[0], q[0], q[0], 1.0]).collect();
+        let before = greys.clone();
+        develop(&mut greys, 4, 4, &neutral, false);
+        for (a, b) in greys.iter().zip(&before) {
+            assert!((a[0] - b[0]).abs() < 1e-3 && (a[0] - a[1]).abs() < 1e-3 && (a[1] - a[2]).abs() < 1e-3, "{a:?} {b:?}");
+        }
+        let red = || vec![[0.8f32, 0.2, 0.2, 1.0]; 4];
+        let mut a = red();
+        develop(&mut a, 2, 2, &CameraRaw { calibration_red_hue: 100.0, ..Default::default() }, false);
+        assert!(a[0][1] > 0.25, "red turns toward orange: {:?}", a[0]);
+        let mut b = red();
+        develop(&mut b, 2, 2, &CameraRaw { calibration_red_sat: -100.0, ..Default::default() }, false);
+        assert!(b[0][0] - b[0][1] < 0.5, "less saturated reds: {:?}", b[0]);
+        let mut s = vec![[0.1f32, 0.1, 0.1, 1.0]; 4];
+        develop(&mut s, 2, 2, &CameraRaw { calibration_shadows_tint: 100.0, ..Default::default() }, false);
+        assert!(s[0][1] < s[0][0] - 0.005, "magenta shadows: {:?}", s[0]);
+        // Out-of-range values are clamped, never non-finite.
+        let mut x = red();
+        develop(&mut x, 2, 2, &CameraRaw { calibration_red_hue: 1e30, calibration_blue_sat: -1e30, calibration_shadows_tint: 1e30, ..Default::default() }, false);
+        assert!(x.iter().flatten().all(|v| v.is_finite()));
     }
 }

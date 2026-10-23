@@ -3856,3 +3856,28 @@ layerLabel	No Color	Sem cor
 	Inspect YorusAi settings	Inspect YorusAi settings
 
 	Stop YorusAi operation	Stop YorusAi operation
+
+# Camera Raw: Auto, White Balance, Curve channels and splits, B&W Mix, Calibration
+	3-Way	3 vias
+	As Shot	Como fotografado
+	Auto tone (Ctrl+Shift+U)	Tom automático (Ctrl+Shift+U)
+	B&W Mix	Mistura P&B
+	Back to the settings the dialog opened with	Voltar às configurações com que a caixa de diálogo abriu
+	Blue Primary	Primária azul
+	Calibration	Calibração
+	Green Primary	Primária verde
+	Parametric	Paramétrica
+	Preview not updated	Visualização não atualizada
+	Red Primary	Primária vermelha
+	Reset {section}	Redefinir {section}
+	Shadows Tint	Matiz das sombras
+	White Balance	Equilíbrio de branco
+	White Balance Tool (I)	Ferramenta Equilíbrio de branco (I)
+	Shadows / Darks split	Divisão Sombras / Escuros
+	Darks / Lights split	Divisão Escuros / Claros
+	Lights / Highlights split	Divisão Claros / Realces
+	Black & White (V)	Preto e branco (V)
+	draft	rascunho
+	Camera Raw preview failed; the previous preview remains	Falha na visualização do Camera Raw; a visualização anterior permanece
+	Camera Raw preview worker stopped	O processo de visualização do Camera Raw parou
+	Cannot start the Camera Raw preview worker	Não é possível iniciar o processo de visualização do Camera Raw
