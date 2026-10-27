@@ -4,12 +4,13 @@
 
 # yorusphoto
 
-A native Rust image editor with layers, masks, PSD support, an integrated Codex assistant and YorusAi Direct image workflows. This repository contains the yorusphoto fork of [PhotoCraft](https://github.com/storytold/photocraft), including the current v7 changes.
+A native Rust image editor with layers, masks, PSD support, an integrated Codex assistant and YorusAi Direct image workflows. This repository contains the yorusphoto fork of [PhotoCraft](https://github.com/storytold/photocraft).
 
 ## Editing with AI
 
 - **Codex workspace:** ChatGPT sign-in, runtime-discovered models and reasoning settings, saved chats and drafts, slash commands, reported context usage, compaction status, account allowances and reset times. Stable Codex runtime updates are checked automatically.
-- **Selected-area generation:** the selected region becomes the image reference. Results arrive on a separate layer at the captured position and dimensions, preserving the source layer and any newer selection.
+- **Image references:** attach up to four PNG, JPEG or WebP images in **Codex → Images**, preview/remove them, and use them alongside the selected region or to guide a new canvas.
+- **Selected-area generation:** the selected region becomes the base image reference. Results arrive on a separate layer at the captured position and dimensions, preserving the source layer and any newer selection.
 - **Whole-image generation:** results open in a separate canvas at the requested dimensions.
 - **YorusAi Direct:** native provider workflows for image generation, remix, upscaling and layer separation, using separately configured API keys.
 - **Agent control:** an authenticated local control channel and a stdio MCP bridge expose editor commands, document inspection, screenshots and image-placement workflows.
@@ -20,13 +21,21 @@ Model availability and allowances come from the signed-in Codex account. Context
 
 ## Windows portable
 
-[Download the Windows 64-bit portable release](https://github.com/yorusd1/yorusphoto/releases/latest). Under **Assets**, choose `yorusphoto-v8-windows-x64-portable.zip`, extract the entire ZIP into a writable folder, and run `Start-yorusphoto.cmd`. No installation or source checkout is required. A matching SHA-256 checksum is provided. Downloads require access to this private repository.
+[Download the Windows 64-bit portable release](https://github.com/yorusd1/yorusphoto/releases/latest). Under **Assets**, choose the Windows portable ZIP, extract the entire ZIP into a writable folder, and run `Start-yorusphoto.cmd`. No installation or source checkout is required. A matching SHA-256 checksum is provided. Downloads require access to this private repository.
 
-The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local. To update from v7, extract v8 into a new folder; your v7 folder and its settings are left untouched. v8 makes Camera Raw responsive and adds Auto, the White Balance tool, per-channel curves, colour-grading wheels, Black & White and Calibration ([details](docs/camera-raw-histogram.md)). Sign in with your own ChatGPT account for Codex, or configure your own provider keys for YorusAi Direct.
+The launcher initializes portable settings, the workspace and the local MCP configuration. Saved conversations and settings remain local. Extract upgrades into a new folder. To retain local chats and settings, close both copies and copy your existing `data/` and/or `yorusphotoData/` folders into the new portable before its first launch; keep the previous folder until you have checked your chats. The Camera Raw responsiveness and controls introduced in v8 are retained ([details](docs/camera-raw-histogram.md)). Sign in with your own ChatGPT account for Codex, or configure your own provider keys for YorusAi Direct.
 
 Portable binaries, downloaded Codex runtimes, private settings, chat histories, credentials and local recovery copies are excluded from this Git repository. The repository contains the source, branding, packaging scripts and reusable checks.
 
 See [the yorusphoto guide](docs/yorusphoto.md) for setup, commands, authentication, model discovery, updates and placement behavior. See [performance measurements](docs/yorusphoto-performance.md) for the v7 optimization results and their limits.
+
+<details>
+<summary>Editor tools</summary>
+
+<h4>🧰 67 tools</h4>
+      Move · Artboard · Rectangular and Elliptical Marquee · Single Row Marquee · Single Column Marquee · Lasso · Polygonal Lasso · Magnetic Lasso · Object Selection · Quick Selection · Magic Wand · Crop · Perspective Crop · Slice · Slice Select · Frame · Eyedropper · Color Sampler · Ruler · Note · Count · Remove · Spot Healing Brush · Healing Brush · Patch · Content-Aware Move · Red Eye · Brush · Pencil · Mixer Brush · Color Replacement · Clone Stamp · Pattern Stamp · History Brush · Eraser · Background Eraser · Magic Eraser · Gradient · Paint Bucket · Blur · Sharpen · Smudge · Dodge · Burn · Sponge · Pen · Freeform Pen · Curvature Pen · Add Anchor Point · Delete Anchor Point · Convert Point · Horizontal and Vertical Type · Horizontal and Vertical Type Mask · Path Selection · Direct Selection · Rectangle · Ellipse · Triangle · Polygon · Line · Custom Shape · Hand · Rotate View · Zoom
+
+</details>
 
 ## Build and verify
 

@@ -18,6 +18,16 @@ Rectangular and elliptical marquees stay inside the canvas while they are drawn.
 
 This changes creation of new marquees. Existing selection and layer movement retain their ordinary behavior. Codex and YorusAi continue to capture the selected region and return a separate layer at its captured bounds; whole-image generation opens an independent canvas.
 
+## Reference images in the Codex Images tab
+
+Open **Codex → Images → Add image…** to attach a PNG, JPEG or WebP. Add up to four uploaded images; each has a thumbnail, name, dimensions and a remove button. **Clear** removes all uploaded references. Describe which image supplies the subject, composition or style in your prompt.
+
+In **Selected area** mode, the captured selection is reference 1 and the uploaded images follow it. The generated result remains a separate layer at the captured position and size. In **New canvas** mode, uploaded images guide generation while the result opens in an independent canvas; no existing document is required. Uploading a reference does not open it as a document or change the placement rectangle. The Assistant tab's selected-area attachment remains independent of these Images-tab uploads.
+
+Attachments stay available for reuse until removed or the app closes. They are kept in transient memory, not saved into editor preferences or local chat history. Uploaded PNGs together must fit within 32 MiB; decoded images are limited to 16 megapixels. JPEG/WebP attachments are converted to PNG for Codex. Only small thumbnails are uploaded to the editor's GPU; shared image buffers avoid duplicating full references when a request starts. The selected crop plus uploads may total at most 64 MiB. Codex receives the images as structured conversation attachments and is instructed to use the exact attached-image count.
+
+Agents can use `codex.references.pick`, `codex.references.add` (`image` as base64, optional `name`), `codex.references.remove` (`index`, zero-based) and `codex.references.clear`. Inspection exposes counts and image dimensions, without image bytes or source paths. Reference edits are blocked while an AI operation is running.
+
 ## Codex workspace, models and saved chats
 
 The assistant uses Codex's real app-server for chat, editor tools, image generation, durable threads, model discovery, context usage, compaction and account limits. The right panel includes the runtime-reported model catalog and supported reasoning efforts. A selection applies to the next turn and is retained per chat; unsupported combinations are rejected. Models are discovered rather than hard-coded. The catalog describes available choices, while a completed request verifies actual access; a catalog entry alone does not grant a model entitlement.

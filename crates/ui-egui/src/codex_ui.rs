@@ -2,6 +2,7 @@
 
 mod chats;
 mod commands;
+mod references;
 mod updates;
 pub mod workspace;
 
@@ -19,6 +20,8 @@ use std::sync::{
 
 pub struct ImageGenerationRequest {
     pub reference: Option<Vec<u8>>,
+    /// Additional user attachments, shared with the UI without copying full image buffers.
+    pub references: Vec<Arc<[u8]>>,
     pub prompt: String,
     pub quality: String,
     pub size: String,
@@ -173,6 +176,7 @@ struct Placement {
 
 #[derive(Default)]
 pub struct Runtime {
+    references: Vec<references::Reference>,
     updates: updates::Runtime,
     workspace: workspace::Workspace,
     chats: chats::Runtime,
@@ -355,6 +359,7 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<(), String> {
     let s = &app.ui.codex;
     let req = ImageGenerationRequest {
         reference,
+        references: app.codex_runtime.references.iter().map(|image| image.png.clone()).collect(),
         prompt: s.prompt.clone(),
         quality: s.quality.clone(),
         size: preferred_size(app),
@@ -910,11 +915,15 @@ pub(crate) fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
     ].into_iter().map(|(id,label,params,enabled)| json!({"id":id,"label":label,"params":params,"menu":[],"shortcut":null,
         "enabled":enabled,"disabledReason":if enabled {Value::Null} else {json!("Codex service unavailable, busy, or no active task to stop")},"needsDocument":false})).collect();
     specs.extend(commands::specs(app));
+    specs.extend(references::specs(app));
     specs.extend(updates::specs(app));
     specs
 }
 
 pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if let Some(result) = references::menu(app, id, params) {
+        return Some(result);
+    }
     if id == "ai.generate" && params.get("prompt").is_some() {
         return Some(configure_generation(app, params).and_then(|()| generate(app)).map(|()| json!({"started":true})));
     }
@@ -942,7 +951,8 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
 pub(crate) fn workspace_inspect(app: &PhotocraftApp) -> Value {
     json!({"workspace":app.codex_runtime.workspace.snapshot(),"model":app.ui.codex.model,"reasoningEffort":app.ui.codex.reasoning_effort,
         "chats":chats::inspect(app),"refreshing":app.codex_runtime.workspace_rx.is_some(),"error":app.codex_runtime.workspace_error,
-        "remoteThreads":app.codex_runtime.remote_threads,"nextCursor":app.codex_runtime.remote_cursor,"updates":updates::inspect(app)})
+        "remoteThreads":app.codex_runtime.remote_threads,"nextCursor":app.codex_runtime.remote_cursor,"updates":updates::inspect(app),
+        "imageReferences":references::inspect(app)})
 }
 
 fn configure_generation(app: &mut PhotocraftApp, params: &Value) -> Result<(), String> {
@@ -1208,6 +1218,7 @@ fn images_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("The result opens in a separate canvas.").small().color(t.text_dim));
     }
     ui.add_space(4.0);
+    references::show(app, ui);
     egui::Frame::new().fill(t.field).corner_radius(18.0).inner_margin(12).show(ui, |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut app.ui.codex.prompt)

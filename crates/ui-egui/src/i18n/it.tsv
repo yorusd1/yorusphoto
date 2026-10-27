@@ -4054,3 +4054,11 @@ navigator	Zoom	Zoom
 	Camera Raw preview failed; the previous preview remains	Anteprima di Camera Raw non riuscita; resta l'anteprima precedente
 	Camera Raw preview worker stopped	Il processo di anteprima di Camera Raw si è interrotto
 	Cannot start the Camera Raw preview worker	Impossibile avviare il processo di anteprima di Camera Raw
+	Black And White	Bianco e nero
+	Calibration Blue Hue	Calibrazione tonalità del blu
+	Calibration Blue Sat	Calibrazione saturazione del blu
+	Calibration Green Hue	Calibrazione tonalità del verde
+	Calibration Green Sat	Calibrazione saturazione del verde
+	Calibration Red Hue	Calibrazione tonalità del rosso
+	Calibration Red Sat	Calibrazione saturazione del rosso
+	Calibration Shadows Tint	Calibrazione tinta delle ombre

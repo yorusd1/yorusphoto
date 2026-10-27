@@ -26,9 +26,9 @@ const TOOL_TIMEOUT: Duration = TURN_TIMEOUT;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const IMAGE_INSTRUCTIONS: &str = "You are the image-generation worker inside yorusphoto. Use the built-in image_gen.imagegen tool exactly once for this request. If a reference image is attached, edit that model-visible image by setting num_last_images_to_include to 1. Omit referenced_image_paths: the attached image is already available in this conversation, so the image tool must not reread a local file. If no image is attached, omit both reference selectors and generate a new image from the prompt. The user's requested size and quality are preferences: the Codex image tool currently chooses both automatically. Do not claim they were enforced. Do not execute commands, use other services, write code, or synthesize a replacement image using code. Return a concise completion message after the image tool completes. If image generation is unavailable, report that explicitly.";
+const IMAGE_INSTRUCTIONS: &str = "You are the image-generation worker inside yorusphoto. Use the built-in image_gen.imagegen tool exactly once for this request. Use all reference images attached to this turn, with the num_last_images_to_include count specified in the turn. Omit referenced_image_paths: attached images are already available in this conversation, so the image tool must not reread local files. If no image is attached, omit both reference selectors and generate a new image from the prompt. The user's requested size and quality are preferences: the Codex image tool currently chooses both automatically. Do not claim they were enforced. Do not execute commands, use other services, write code, or synthesize a replacement image using code. Return a concise completion message after the image tool completes. If image generation is unavailable, report that explicitly.";
 const CHAT_INSTRUCTIONS: &str = "You are Codex embedded in the yorusphoto image editor. Help the user accomplish their request autonomously in the live document. First use yorusphoto_commands to inspect the available editor commands and current document. Drive editing through yorusphoto_execute, with exact documented command IDs and validated parameters. Every edit is an undoable editor command. For document file I/O, use the app.open and app.save methods listed under fileTools with paths relative to the authorized workspace; if that authority is unavailable, stop and explain it. Do not use filesystem or shell tools to manipulate the user's document. Stop editing when the user cancels the task. Use external apps or send messages only when the user explicitly asks. Use built-in image_gen.imagegen for requested image generation or image editing; returned images are delivered to the editor automatically, using the user's chosen selected-area or new-canvas destination. Request image dimensions and quality in the prompt as preferences; Codex currently chooses them automatically. Do not claim generation succeeded until the tool succeeds. Ask before destructive actions beyond the user's request.";
-const ATTACHED_REFERENCE_INSTRUCTIONS: &str = "\nThe image attached to this turn is the selected-area reference. For image editing, pass num_last_images_to_include: 1 to image_gen.imagegen and omit referenced_image_paths. Use the attached conversation image directly; do not look for or reread its local file.";
+const ATTACHED_REFERENCE_INSTRUCTIONS: &str = "\nThe image attached to this turn is a reference image. For image editing, pass num_last_images_to_include: 1 to image_gen.imagegen and omit referenced_image_paths. Use the attached conversation image directly; do not look for or reread its local file.";
 
 /// Runs one subscription-backed image turn on a worker thread.
 pub fn start(request: ImageGenerationRequest, reply: mpsc::Sender<Result<Vec<u8>, String>>) {
@@ -93,7 +93,7 @@ fn generate(request: ImageGenerationRequest) -> Result<Vec<u8>, String> {
         return Err("Image quality or size preference is too long.".into());
     }
     let workspace = TemporaryWorkspace::new()?;
-    let reference = workspace.reference(request.reference.as_deref())?;
+    let references = workspace.image_references(request.reference.as_deref(), &request.references)?;
     let mut server = AppServer::start(&request.codex_path, &workspace.0, Some(request.cancel.clone()))?;
     server.require_chatgpt()?;
     let capability = server.rpc("modelProvider/capabilities/read", json!({}))?;
@@ -102,11 +102,18 @@ fn generate(request: ImageGenerationRequest) -> Result<Vec<u8>, String> {
     }
     let selection = workspace::ModelSelection { model: request.model, effort: request.reasoning_effort, requires_image: true };
     let thread = server.start_thread(None, &workspace.0, IMAGE_INSTRUCTIONS, false, &selection)?;
+    let reference_roles = if request.reference.is_some() {
+        "Reference 1 is the captured selected canvas region: use it as the base composition. Any following images are additional user references; follow the user's prompt for how to use them."
+    } else if !references.is_empty() {
+        "The attached images are user-provided references for a new image; follow the user's prompt for their content, style or composition."
+    } else {
+        ""
+    };
     let prompt = format!(
-        "Generate one image. Preferred rendering quality: {}. Preferred output dimensions: {}. These are image-tool prompt preferences. User request:\n{}",
-        request.quality, request.size, request.prompt
+        "Generate one image. Preferred rendering quality: {}. Preferred output dimensions: {}. These are image-tool prompt preferences. {}\nUser request:\n{}",
+        request.quality, request.size, reference_roles, request.prompt
     );
-    let turn_id = server.start_turn(&thread.id, &prompt, reference.as_deref(), &thread)?;
+    let turn_id = server.start_turn(&thread.id, &prompt, &references, &thread)?;
     let images = server.run_turn(&thread.id, &turn_id, &request.cancel, None, None)?;
     if request.cancel.load(Ordering::Relaxed) {
         return Err("Cancelled.".into());
@@ -130,7 +137,8 @@ fn chat_turn(request: CodexChatRequest, events: &mpsc::Sender<CodexEvent>, comma
     let thread = server.start_thread(request.thread_id.as_deref(), &workspace.0, CHAT_INSTRUCTIONS, true, &selection)?;
     let _ = events.send(CodexEvent::Started(thread.id.clone()));
     let _ = events.send(CodexEvent::Telemetry { kind: "model".into(), data: json!({"model":thread.model,"reasoningEffort":thread.effort}) });
-    let turn_id = server.start_turn(&thread.id, &request.prompt, reference.as_deref(), &thread)?;
+    let references: Vec<_> = reference.into_iter().collect();
+    let turn_id = server.start_turn(&thread.id, &request.prompt, &references, &thread)?;
     let images = server.run_turn(&thread.id, &turn_id, &request.cancel, Some(events), Some(commands))?;
     for bytes in images {
         if request.cancel.load(Ordering::Relaxed) {
@@ -281,6 +289,30 @@ fn validate_prompt(prompt: &str) -> Result<(), String> {
 struct TemporaryWorkspace(PathBuf, bool);
 
 impl TemporaryWorkspace {
+    fn image_references(&self, selection: Option<&[u8]>, uploads: &[Arc<[u8]>]) -> Result<Vec<PathBuf>, String> {
+        if uploads.len() > 4 {
+            return Err("Use at most four uploaded image references plus the selected canvas region.".into());
+        }
+        let mut total = 0usize;
+        for bytes in selection.into_iter().chain(uploads.iter().map(AsRef::as_ref)) {
+            validate_png(bytes)?;
+            total = total.checked_add(bytes.len()).ok_or("Image reference size overflow.")?;
+            if total > 64 << 20 {
+                return Err("The selection and uploaded references together exceed 64 MiB.".into());
+            }
+        }
+        let mut paths = Vec::new();
+        if let Some(path) = self.reference(selection)? {
+            paths.push(path);
+        }
+        for bytes in uploads {
+            let path = self.0.join(format!("reference-{}.png", paths.len() + 1));
+            fs::write(&path, bytes).map_err(|error| format!("Could not prepare an image reference: {error}"))?;
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
     fn new() -> Result<Self, String> {
         Self::allocate(&std::env::temp_dir(), true)
     }
@@ -539,8 +571,11 @@ impl AppServer {
         Ok(workspace::StartedThread { id: id.into(), model, effort })
     }
 
-    fn start_turn(&mut self, thread_id: &str, prompt: &str, reference: Option<&Path>, thread: &workspace::StartedThread) -> Result<String, String> {
-        let input = turn_input(prompt, reference);
+    fn start_turn(&mut self, thread_id: &str, prompt: &str, references: &[PathBuf], thread: &workspace::StartedThread) -> Result<String, String> {
+        if references.len() > 5 {
+            return Err("The image tool supports at most five attached references per turn.".into());
+        }
+        let input = turn_input(prompt, references);
         let mut params = json!({"threadId":thread_id,"input":input,"model":thread.model});
         if let Some(effort) = &thread.effort {
             params["effort"] = json!(effort);
@@ -764,10 +799,16 @@ impl LoginConnection for AppServer {
     }
 }
 
-fn turn_input(prompt: &str, reference: Option<&Path>) -> Vec<Value> {
-    let text = if reference.is_some() { format!("{prompt}{ATTACHED_REFERENCE_INSTRUCTIONS}") } else { prompt.into() };
+fn turn_input(prompt: &str, references: &[PathBuf]) -> Vec<Value> {
+    let text = match references.len() {
+        0 => prompt.into(),
+        1 => format!("{prompt}{ATTACHED_REFERENCE_INSTRUCTIONS}"),
+        count => format!(
+            "{prompt}\nAll {count} images attached to this turn are references. Use num_last_images_to_include: {count} with image_gen.imagegen and omit referenced_image_paths. Use all attached conversation images directly, in their given order; do not look for or reread their local files."
+        ),
+    };
     let mut input = vec![json!({"type":"text","text":text})];
-    if let Some(path) = reference {
+    for path in references {
         // Codex loads this structured attachment into the conversation. The model-facing
         // text deliberately contains no filename, avoiding a second sandbox filesystem read.
         input.push(json!({"type":"localImage","path":path,"detail":"original"}));
@@ -1095,15 +1136,60 @@ mod tests {
     #[test]
     fn attached_reference_uses_the_conversation_image_without_a_model_facing_path() {
         let path = Path::new(r"C:\Users\Example User\AppData\Local\Temp\selected-reference.png");
-        let input = turn_input("Add a flying character while preserving the photograph.", Some(path));
+        let input = turn_input("Add a flying character while preserving the photograph.", &[path.to_owned()]);
         assert_eq!(input.len(), 2);
         let text = input.first().and_then(|item| item.get("text")).and_then(Value::as_str).expect("reference instruction");
         assert!(text.contains("num_last_images_to_include: 1"));
         assert!(text.contains("omit referenced_image_paths"));
         assert!(!text.contains(&path.to_string_lossy().into_owned()));
         assert_eq!(input.get(1), Some(&json!({"type":"localImage","path":path,"detail":"original"})));
-        let without_reference = turn_input("Create a fresh image.", None);
+        let without_reference = turn_input("Create a fresh image.", &[]);
         assert_eq!(without_reference, vec![json!({"type":"text","text":"Create a fresh image."})]);
+    }
+
+    #[test]
+    fn every_uploaded_reference_is_attached_once_in_order_with_the_exact_tool_count() {
+        for count in 1..=5 {
+            let paths: Vec<_> = (0..count).map(|index| PathBuf::from(format!("C:/private/reference-{index}.png"))).collect();
+            let input = turn_input("Use all the attached references.", &paths);
+            assert_eq!(input.len(), count + 1);
+            let text = input.first().unwrap()["text"].as_str().unwrap();
+            assert!(text.contains(&format!("num_last_images_to_include: {count}")));
+            assert!(text.contains("omit referenced_image_paths"));
+            assert!(!text.contains("C:/private"));
+            for (item, path) in input.iter().skip(1).zip(&paths) {
+                assert_eq!(item, &json!({"type":"localImage","path":path,"detail":"original"}));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_crop_and_uploads_use_distinct_immutable_files_and_are_cleaned_up() {
+        let workspace = TemporaryWorkspace::new().unwrap();
+        let root = workspace.0.clone();
+        // Minimal fixture accepted by the existing header validator; UI validates decoding.
+        let selection = b"\x89PNG\r\n\x1a\nselection";
+        let first: Arc<[u8]> = b"\x89PNG\r\n\x1a\nupload-one".as_slice().into();
+        let second: Arc<[u8]> = b"\x89PNG\r\n\x1a\nupload-two".as_slice().into();
+        let paths = workspace.image_references(Some(selection), &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(fs::read(paths.first().unwrap()).unwrap(), selection);
+        assert_eq!(fs::read(paths.get(1).unwrap()).unwrap().as_slice(), first.as_ref());
+        assert_eq!(fs::read(paths.get(2).unwrap()).unwrap().as_slice(), second.as_ref());
+        assert!(paths.iter().all(|path| path.starts_with(&root)));
+        assert_eq!(paths.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        drop(workspace);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn malformed_or_excess_uploaded_references_are_rejected_before_any_files_are_written() {
+        let workspace = TemporaryWorkspace::new().unwrap();
+        let png: Arc<[u8]> = b"\x89PNG\r\n\x1a\nupload".as_slice().into();
+        assert!(workspace.image_references(None, &[]).unwrap().is_empty());
+        assert!(workspace.image_references(None, &vec![png.clone(); 5]).is_err());
+        assert!(workspace.image_references(Some(&png), &[Arc::from(b"invalid".as_slice())]).is_err());
+        assert_eq!(fs::read_dir(&workspace.0).unwrap().count(), 0);
     }
 
     #[test]

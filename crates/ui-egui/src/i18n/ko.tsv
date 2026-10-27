@@ -3262,3 +3262,11 @@ curves	Smooth	매끄럽게
 	Camera Raw preview failed; the previous preview remains	Camera Raw 미리 보기에 실패했습니다. 이전 미리 보기가 유지됩니다
 	Camera Raw preview worker stopped	Camera Raw 미리 보기 작업이 중지되었습니다
 	Cannot start the Camera Raw preview worker	Camera Raw 미리 보기 작업을 시작할 수 없습니다
+	Black And White	흑백
+	Calibration Blue Hue	보정 파랑 색조
+	Calibration Blue Sat	보정 파랑 채도
+	Calibration Green Hue	보정 초록 색조
+	Calibration Green Sat	보정 초록 채도
+	Calibration Red Hue	보정 빨강 색조
+	Calibration Red Sat	보정 빨강 채도
+	Calibration Shadows Tint	보정 어두운 영역 색조
