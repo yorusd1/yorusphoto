@@ -45,9 +45,20 @@ python scripts/yorusphoto/verify_portable_archive.py dist/yorusphoto-portable --
 
 The verifier checks the explicit public-file allowlist, runtime manifest hashes,
 licenses, ZIP CRCs, and equality between packaged files and the extracted folder.
-It rejects private state in the ZIP and writes a SHA-256 sidecar plus the requested
-report. Run it with a normal Python interpreter so its integrity assertions remain
-enabled. Do not use `python -O`.
+It also scans the project's editor and CLI for Windows, macOS, or Linux home paths
+embedded by the compiler, including UTF-16 strings. The Cargo wrapper remaps local
+build paths to public prefixes. This gate excludes third-party runtime binaries
+and license text, whose public distribution is checked separately. Scan reports
+contain categories and byte offsets without copying identity-bearing matches.
+The verifier rejects private state in the ZIP and writes a SHA-256 sidecar plus the
+requested report. Run it with a normal Python interpreter so its integrity assertions
+remain enabled. Do not use `python -O`.
+
+Run the privacy gate's synthetic regressions with:
+
+```powershell
+python -m unittest discover -s scripts/yorusphoto -p test_verify_release_privacy.py
+```
 
 `dist/`, `.toolchain/`, local `verification/` reports, credentials, editor settings,
 chat history, workspaces, generated images, and build outputs are excluded from the

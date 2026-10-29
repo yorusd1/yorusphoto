@@ -6,7 +6,9 @@ A native Windows image editor with a Codex assistant and YorusAi image tools. Bo
 
 1. Extract the complete portable folder to a writable Windows folder.
 2. Open **Start-yorusphoto.cmd**. The launcher normally keeps editor preferences below `data/`, creates `workspace/`, and starts an authenticated control endpoint on `127.0.0.1:50495`. If you previously opened the EXE directly and saved chats in `yorusphotoData/`, the launcher reuses that directory when `data/` has no chat history. It does not move or copy either history; when both exist, `data/` retains precedence.
-3. The **Codex** panel opens on the right by default. Use its settings button and **Continue with ChatGPT**. If Codex already has a ChatGPT login, the panel confirms that existing session. Otherwise it opens your browser and shows **Open sign-in page**, **Copy link** and **Cancel sign-in** in the panel. Use the visible link if your browser does not open automatically. The GPT button in the right rail reopens or closes the panel; the wand button opens YorusAi.
+3. The **Codex** panel opens on the right by default. Use its settings button to view **ChatGPT account**. The panel automatically checks the Codex session: an existing login shows **Signed in with ChatGPT**, the email address when Codex supplies one, and the reported plan. **Refresh account** checks again. If signed out, **Continue with ChatGPT** opens your browser and shows **Open sign-in page**, **Copy link** and **Cancel sign-in** in the panel. Use the visible link if your browser does not open automatically. The GPT button in the right rail reopens or closes the panel; the wand button opens YorusAi.
+
+**Switch account** signs out before opening a new sign-in flow; **Sign out** disconnects the shared Codex session. These controls also affect other Codex clients using the same Codex home. Saved chats, drafts and image references stay on this device. Account identity is held only in memory and excluded from editor preferences, saved chats and control/MCP inspection. If a check fails, the panel labels any previous account as last confirmed rather than claiming sign-out. `/account` opens these controls and `/logout` signs out.
 
 The package includes the Codex runtime. It does not include anyone's credentials. Codex manages its own sign-in separately from the portable editor settings, normally in your user Codex directory. Image generation uses the ChatGPT account connected to Codex and the account's available image-generation entitlement and limits. The Codex workflow does not need an OpenAI API key. YorusAi Direct uses separately configured provider API keys.
 
@@ -60,6 +62,8 @@ This is the native yorusphoto workspace around Codex. The following slash comman
 
 | Command | Action |
 |---|---|
+| `/account` | Connected account, refresh, switch account and sign-out controls |
+| `/logout` | Sign out of the shared Codex session while retaining saved chats |
 | `/help` | Command reference |
 | `/status` | Context, compaction and account details |
 | `/usage`, `/limits` | Refresh account allowances and credits |

@@ -47,6 +47,27 @@ fn shortened(text: &str, limit: usize) -> String {
     format!("{}…", text.get(..end).unwrap_or_default())
 }
 
+/// Split public account telemetry from identity shown only in the live account panel.
+/// The caller must not persist or expose `accountIdentity` through agent inspection.
+fn account_response(value: &Value) -> Result<(Value, Value), String> {
+    let account = value.get("account").ok_or("Codex did not return its account status.")?;
+    let mut identity = json!({"email":null});
+    if let Some(required) = value.get("requiresOpenaiAuth").and_then(Value::as_bool) {
+        identity["requiresOpenaiAuth"] = json!(required);
+    }
+    if account.is_null() {
+        return Ok((Value::Null, identity));
+    }
+    let kind = bounded(account.get("type"), 64)
+        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+        .ok_or("Codex returned invalid account information.")?;
+    let plan = bounded(account.get("planType"), 128).filter(|text| !text.chars().any(char::is_control));
+    if kind == "chatgpt" {
+        identity["email"] = json!(bounded(account.get("email"), 320).filter(|text| !text.is_empty() && !text.chars().any(char::is_control)));
+    }
+    Ok((json!({"type":kind,"planType":plan}), identity))
+}
+
 pub(super) fn select_model(catalog: &Value, selection: &ModelSelection) -> Result<(String, Option<String>), String> {
     let models = catalog.get("data").and_then(Value::as_array).ok_or("Codex did not return its runtime model catalog.")?;
     let accepts_image = |model: &&Value| {
@@ -566,10 +587,10 @@ fn perform_inner(
         CodexWorkspaceAction::Refresh => {
             let mut result = json!({"errors":[]});
             let mut errors = Vec::new();
-            match server.rpc("account/read", json!({"refreshToken":false})) {
-                Ok(account) => {
-                    let account = account.get("account").unwrap_or(&Value::Null);
-                    result["account"] = json!({"type":bounded(account.get("type"),32),"planType":bounded(account.get("planType"),64)});
+            match server.rpc("account/read", json!({"refreshToken":false})).and_then(|account| account_response(&account)) {
+                Ok((account, identity)) => {
+                    result["account"] = account;
+                    result["accountIdentity"] = identity;
                 }
                 Err(_) => errors.push("Could not refresh the Codex account status."),
             }
@@ -577,12 +598,22 @@ fn perform_inner(
                 Ok(models) => result["models"] = models,
                 Err(_) => errors.push("Could not refresh the Codex model catalog."),
             }
-            match server.rpc("account/rateLimits/read", json!({})) {
-                Ok(rates) => result["rateLimits"] = rate_response(&rates),
-                Err(_) => errors.push("Codex usage is temporarily unavailable. Refresh again after signing in."),
+            // Signed-out and API-key sessions have no ChatGPT account limits to read.
+            if result.get("account").is_none() || result.pointer("/account/type").and_then(Value::as_str) == Some("chatgpt") {
+                match server.rpc("account/rateLimits/read", json!({})) {
+                    Ok(rates) => result["rateLimits"] = rate_response(&rates),
+                    Err(_) => errors.push("Codex usage is temporarily unavailable. Refresh again after signing in."),
+                }
             }
             result["errors"] = json!(errors);
             Ok(result)
+        }
+        CodexWorkspaceAction::Logout => {
+            let acknowledgement = server.rpc("account/logout", json!({})).map_err(|_| "Could not sign out of Codex. Refresh account status and try again.")?;
+            if !acknowledgement.is_object() {
+                return Err("Codex did not confirm sign-out. Refresh account status and try again.".into());
+            }
+            Ok(json!({"loggedOut":true,"account":null,"accountIdentity":{"email":null}}))
         }
         CodexWorkspaceAction::ListThreads { cursor, archived, search } => {
             if cursor.as_ref().is_some_and(|text| text.len() > 4096) || search.as_ref().is_some_and(|text| text.len() > 256) {
@@ -914,10 +945,10 @@ mod tests {
     }
 
     #[test]
-    fn refresh_optional_failures_do_not_hide_models_and_account_is_redacted() {
+    fn refresh_optional_failures_preserve_models_and_keep_identity_separate() {
         let mut server = Mock {
             replies: VecDeque::from([
-                Ok(json!({"account":{"type":"chatgpt","planType":"plus","email":"private","accessToken":"secret"}})),
+                Ok(json!({"account":{"type":"chatgpt","planType":"plus","email":"demo@example.invalid","accessToken":"secret"},"requiresOpenaiAuth":true})),
                 Ok(catalog()),
                 Ok(catalog()),
                 Err("private provider diagnostics".into()),
@@ -927,10 +958,105 @@ mod tests {
         let (sender, _) = mpsc::channel();
         let result = perform_inner(&mut server, &request(CodexWorkspaceAction::Refresh), Path::new("/app/codex-workspace"), &sender).expect("partial refresh");
         assert_eq!(result.pointer("/account/type"), Some(&json!("chatgpt")));
+        assert_eq!(result.pointer("/accountIdentity/email"), Some(&json!("demo@example.invalid")));
+        assert_eq!(result.pointer("/accountIdentity/requiresOpenaiAuth"), Some(&json!(true)));
+        assert!(result.get("account").expect("public telemetry").get("email").is_none());
         assert_eq!(result.pointer("/models/data/1/model"), Some(&json!("vision-model")));
         assert_eq!(result.get("errors").and_then(Value::as_array).expect("errors").len(), 1);
         assert!(!result.to_string().contains("private"));
         assert!(!result.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn account_identity_is_bounded_optional_and_never_contains_credentials() {
+        let (account, identity) = account_response(&json!({"account":{
+            "type":"chatgpt","planType":"pro","email":"demo@example.invalid",
+            "accessToken":"private-token","refreshToken":"private-refresh","id":"private-id"
+        },"requiresOpenaiAuth":true}))
+        .expect("account");
+        assert_eq!(account, json!({"type":"chatgpt","planType":"pro"}));
+        assert_eq!(identity, json!({"email":"demo@example.invalid","requiresOpenaiAuth":true}));
+        assert!(!json!([account, identity]).to_string().contains("private"));
+        for email in [json!(null), json!(false), json!(42), json!("line\nbreak"), json!("\0"), json!("é".repeat(161))] {
+            let (_, identity) = account_response(&json!({"account":{"type":"chatgpt","email":email}})).expect("account without email");
+            assert_eq!(identity.get("email"), Some(&Value::Null));
+        }
+        let (account, identity) = account_response(&json!({"account":{"type":"apiKey","email":"private-api-email"}})).expect("api account");
+        assert_eq!(account.get("type"), Some(&json!("apiKey")));
+        assert_eq!(identity, json!({"email":null}));
+        for malformed in [
+            json!({}),
+            json!({"account":42}),
+            json!({"account":{}}),
+            json!({"account":{"type":""}}),
+            json!({"account":{"type":false}}),
+            json!({"account":{"type":"bad\ntype"}}),
+            json!({"account":{"type":"x".repeat(65)}}),
+        ] {
+            assert!(account_response(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_out_refresh_is_authoritative_and_skips_chatgpt_limits() {
+        for account in [Value::Null, json!({"type":"apiKey"})] {
+            let mut server = Mock {
+                replies: VecDeque::from([Ok(json!({"account":account,"requiresOpenaiAuth":true})), Ok(catalog()), Ok(catalog())]),
+                ..Default::default()
+            };
+            let (sender, _) = mpsc::channel();
+            let result =
+                perform_inner(&mut server, &request(CodexWorkspaceAction::Refresh), Path::new("/app/codex-workspace"), &sender).expect("signed-out refresh");
+            let expected = if account.is_null() { Value::Null } else { json!({"type":"apiKey","planType":null}) };
+            assert_eq!(result.get("account"), Some(&expected));
+            assert!(result.get("rateLimits").is_none());
+            assert_eq!(result.get("errors"), Some(&json!([])));
+            assert!(!server.calls.iter().any(|(method, _)| method == "account/rateLimits/read"));
+            assert_eq!(server.calls.first(), Some(&("account/read".into(), json!({"refreshToken":false}))));
+        }
+        assert_eq!(
+            account_response(&json!({"account":null,"requiresOpenaiAuth":false})).expect("external provider"),
+            (Value::Null, json!({"email":null,"requiresOpenaiAuth":false}))
+        );
+    }
+
+    #[test]
+    fn failed_account_refresh_stays_unknown_and_redacts_provider_errors() {
+        let mut server = Mock {
+            replies: VecDeque::from([Err("private-provider-email@example.invalid".into()), Ok(catalog()), Ok(catalog()), Ok(json!({}))]),
+            ..Default::default()
+        };
+        let (sender, _) = mpsc::channel();
+        let result = perform_inner(&mut server, &request(CodexWorkspaceAction::Refresh), Path::new("/app/codex-workspace"), &sender).expect("partial refresh");
+        assert!(result.get("account").is_none());
+        assert!(result.get("accountIdentity").is_none());
+        assert_eq!(result.get("errors"), Some(&json!(["Could not refresh the Codex account status."])));
+        assert!(!result.to_string().contains("private"));
+    }
+
+    #[test]
+    fn logout_uses_documented_rpc_and_preserves_saved_chats() {
+        let (sender, receiver) = mpsc::channel();
+        let mut server = Mock { replies: VecDeque::from([Ok(json!({}))]), ..Default::default() };
+        let result = perform_inner(&mut server, &request(CodexWorkspaceAction::Logout), Path::new("/app/codex-workspace"), &sender).expect("logout");
+        assert_eq!(server.calls, vec![("account/logout".into(), json!({}))]);
+        assert_eq!(result, json!({"loggedOut":true,"account":null,"accountIdentity":{"email":null}}));
+        assert!(receiver.try_recv().is_err());
+        let mut server = Mock { replies: VecDeque::from([Err("private account detail".into())]), ..Default::default() };
+        let error = perform_inner(&mut server, &request(CodexWorkspaceAction::Logout), Path::new("/app/codex-workspace"), &sender).expect_err("logout failed");
+        assert!(!error.contains("private"));
+        assert!(error.contains("Could not sign out"));
+        let mut server = Mock { replies: VecDeque::from([Ok(Value::Null)]), ..Default::default() };
+        assert!(
+            perform_inner(&mut server, &request(CodexWorkspaceAction::Logout), Path::new("/app/codex-workspace"), &sender)
+                .expect_err("malformed logout confirmation")
+                .contains("did not confirm")
+        );
+        let mut cancelled = request(CodexWorkspaceAction::Logout);
+        cancelled.cancel = Arc::new(AtomicBool::new(true));
+        let mut server = Mock::default();
+        assert!(perform_inner(&mut server, &cancelled, Path::new("/app/codex-workspace"), &sender).is_err());
+        assert!(server.calls.is_empty());
     }
 
     #[test]

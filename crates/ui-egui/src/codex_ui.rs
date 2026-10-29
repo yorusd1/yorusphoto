@@ -1,5 +1,6 @@
 //! Native Codex workspace and selection-safe generated image placement.
 
+mod account;
 mod chats;
 mod commands;
 mod references;
@@ -54,6 +55,7 @@ pub enum CodexEvent {
 #[derive(Clone, Debug)]
 pub enum CodexWorkspaceAction {
     Refresh,
+    Logout,
     ListThreads { cursor: Option<String>, archived: bool, search: Option<String> },
     ReadThread { thread_id: String },
     RenameThread { thread_id: String, name: String },
@@ -197,7 +199,9 @@ pub struct Runtime {
     login_cancel: Option<Arc<AtomicBool>>,
     login_url: Option<String>,
     browser_error: Option<String>,
-    connected: bool,
+    account: account::Session,
+    switch_after_logout: bool,
+    show_account: bool,
     history_writable: bool,
     history_snapshot: Option<String>,
     history_error: Option<String>,
@@ -216,7 +220,8 @@ impl Runtime {
             || self.workspace_action.as_ref().is_some_and(|action| !matches!(action, CodexWorkspaceAction::Refresh | CodexWorkspaceAction::ListThreads { .. }))
     }
     pub fn connection(&self) -> Value {
-        json!({"signingIn":self.login_rx.is_some(),"sessionConfirmed":self.connected,
+        json!({"signingIn":self.login_rx.is_some(),"sessionConfirmed":self.account.connected(),
+            "accountState":self.account.kind(),"accountStale":self.account.stale,"accountDetailsAvailable":self.account.email.is_some(),
             "manualLinkAvailable":self.login_url.is_some(),"historyAvailable":self.history_writable,
             "historyError":self.history_error})
     }
@@ -574,7 +579,7 @@ fn poll(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 app.codex_runtime.login_cancel = None;
                 app.codex_runtime.login_url = None;
                 app.codex_runtime.browser_error = None;
-                app.codex_runtime.connected = true;
+                app.codex_runtime.account.confirm_login();
                 app.codex_runtime.next_workspace_refresh = 0.0;
                 status(app, "Connected to your ChatGPT account through Codex. Your existing session can be reused.", false);
                 break;
@@ -693,6 +698,10 @@ fn poll_workspace(app: &mut PhotocraftApp) {
                 break;
             }
             Some(Ok(CodexWorkspaceEvent::Error(error))) => {
+                if matches!(app.codex_runtime.workspace_action, Some(CodexWorkspaceAction::Refresh | CodexWorkspaceAction::Logout)) {
+                    app.codex_runtime.account.stale = true;
+                }
+                app.codex_runtime.switch_after_logout = false;
                 let compact = matches!(app.codex_runtime.workspace_action, Some(CodexWorkspaceAction::CompactThread { .. }));
                 app.codex_runtime.workspace_rx = None;
                 app.codex_runtime.workspace_action = None;
@@ -705,6 +714,8 @@ fn poll_workspace(app: &mut PhotocraftApp) {
                 break;
             }
             Some(Err(TryRecvError::Disconnected)) => {
+                app.codex_runtime.account.stale = true;
+                app.codex_runtime.switch_after_logout = false;
                 if matches!(app.codex_runtime.workspace_action, Some(CodexWorkspaceAction::CompactThread { .. })) {
                     app.codex_runtime
                         .workspace
@@ -726,23 +737,43 @@ fn apply_workspace_result(app: &mut PhotocraftApp, action: Option<CodexWorkspace
         Some(CodexWorkspaceAction::Refresh) => {
             let now = unix_now();
             let mut errors = Vec::new();
+            let has_account = match account::apply(app, data, now) {
+                Ok(available) => available,
+                Err(error) => {
+                    errors.push(error);
+                    false
+                }
+            };
             if let Some(models) = data.get("models").filter(|value| !value.is_null())
                 && let Err(error) = app.codex_runtime.workspace.apply_models(models, now)
             {
                 errors.push(error);
             }
-            if let Some(account) = data.get("account").filter(|value| !value.is_null())
-                && let Err(error) = app.codex_runtime.workspace.apply_account(account, now)
-            {
-                errors.push(error);
-            }
-            if let Some(limits) = data.get("rateLimits").filter(|value| !value.is_null())
+            if has_account
+                && let Some(limits) = data.get("rateLimits").filter(|value| !value.is_null())
                 && let Err(error) = app.codex_runtime.workspace.apply_rate_limits(limits, now)
             {
                 errors.push(error);
             }
             errors.extend(data.get("errors").and_then(Value::as_array).into_iter().flatten().take(8).filter_map(Value::as_str).map(str::to_owned));
             app.codex_runtime.workspace_error = (!errors.is_empty()).then(|| errors.join("\n"));
+        }
+        Some(CodexWorkspaceAction::Logout) => {
+            if data.get("loggedOut").and_then(Value::as_bool) != Some(true) {
+                app.codex_runtime.switch_after_logout = false;
+                return Err("Codex did not confirm sign-out. Refresh the account to check its status.".into());
+            }
+            account::apply(app, &json!({"account":null}), unix_now())?;
+            app.codex_runtime.workspace.models.clear();
+            app.codex_runtime.workspace.model_catalog = None;
+            app.codex_runtime.workspace.models_observed_at_unix = None;
+            app.codex_runtime.remote_threads.clear();
+            app.codex_runtime.remote_cursor = None;
+            let switch = std::mem::take(&mut app.codex_runtime.switch_after_logout);
+            status(app, "Signed out of Codex. Your saved chats remain on this device.", false);
+            if switch {
+                start_login(app)?;
+            }
         }
         Some(CodexWorkspaceAction::ReadThread { .. } | CodexWorkspaceAction::ForkThread { .. }) => {
             chats::import_backend(app, data)?;
@@ -927,6 +958,9 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
     if id == "ai.generate" && params.get("prompt").is_some() {
         return Some(configure_generation(app, params).and_then(|()| generate(app)).map(|()| json!({"started":true})));
     }
+    if matches!(id, "codex.account" | "codex.login" | "codex.logout" | "codex.account.switch") && params.as_object().is_none_or(|params| !params.is_empty()) {
+        return Some(Err("This account command takes an empty parameter object.".into()));
+    }
     match id {
         "window.codex" | "ai.generate" => {
             crate::ai_sidebar::open(app, crate::ai_sidebar::Tab::Codex);
@@ -934,6 +968,12 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
             Some(Ok(json!({"open":true})))
         }
         "codex.login" => Some(start_login(app).map(|()| json!({"started":true}))),
+        "codex.logout" => Some(account::logout(app, false).map(|()| json!({"started":true}))),
+        "codex.account.switch" => Some(account::logout(app, true).map(|()| json!({"started":true}))),
+        "codex.account" => {
+            app.codex_runtime.show_account = true;
+            Some(Ok(json!({"open":true})))
+        }
         "codex.cancel" => {
             stop(app);
             Some(Ok(json!({"cancelled":true})))
@@ -1018,6 +1058,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if app.codex_runtime.busy() || app.codex_runtime.login_rx.is_some() || app.codex_runtime.workspace_rx.is_some() || app.codex_runtime.updates.running() {
         ctx.request_repaint_after(std::time::Duration::from_millis(60));
     }
+    let mut open = app.codex_runtime.show_account;
+    egui::Window::new("ChatGPT account").id(egui::Id::new("codex-account")).open(&mut open).resizable(false).show(ctx, |ui| connection_ui(app, ui));
+    app.codex_runtime.show_account = open;
     workspace_windows(app, ctx);
     updates::window(app, ctx);
 }
@@ -1089,6 +1132,10 @@ fn start_login(app: &mut PhotocraftApp) -> Result<(), String> {
     if app.codex_runtime.busy() || app.codex_runtime.login_rx.is_some() {
         return Err("Wait for the current Codex operation to finish.".into());
     }
+    account::retire_refresh(app);
+    if app.codex_runtime.workspace_rx.is_some() {
+        return Err("Wait for the current Codex account or chat operation to finish.".into());
+    }
     let login = app.services.codex_login.as_ref().ok_or("The Codex sign-in service is unavailable.")?;
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1133,25 +1180,18 @@ fn login_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 }
 
 fn connection_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    ui.set_min_width(235.0);
-    ui.strong("ChatGPT connection");
-    ui.label("Uses your Codex / ChatGPT sign-in.");
-    if app.codex_runtime.connected {
-        ui.strong("ChatGPT session confirmed");
-    }
-    if ui
-        .add_enabled(
-            !app.codex_runtime.busy() && app.codex_runtime.login_rx.is_none() && app.services.codex_login.is_some(),
-            egui::Button::new("Continue with ChatGPT"),
-        )
-        .clicked()
-        && let Err(error) = start_login(app)
-    {
-        status(app, error, true);
-    }
+    account::ui(app, ui);
+    login_ui(app, ui);
     ui.collapsing("Advanced", |ui| {
         ui.small("Codex executable; leave empty for automatic detection.");
-        ui.text_edit_singleline(&mut app.ui.codex.codex_path);
+        if ui.add_enabled(!app.codex_runtime.busy() && app.codex_runtime.login_rx.is_none(), egui::TextEdit::singleline(&mut app.ui.codex.codex_path)).changed()
+        {
+            account::retire_refresh(app);
+            app.codex_runtime.account = account::Session::default();
+            app.codex_runtime.workspace.account = None;
+            account::clear_allowances(app);
+            app.codex_runtime.next_workspace_refresh = ui.ctx().input(|input| input.time) + 1.5;
+        }
     });
     ui.separator();
     updates::settings_ui(app, ui);
@@ -1549,7 +1589,7 @@ mod tests {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
         start_login(&mut app).unwrap();
         poll(&mut app, &egui::Context::default());
-        assert!(app.codex_runtime.connected);
+        assert!(app.codex_runtime.account.connected());
         assert!(app.codex_runtime.login_rx.is_none());
         assert!(app.codex_runtime.login_url.is_none());
         assert!(app.ui.codex.status.contains("Connected"));

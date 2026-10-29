@@ -24,9 +24,14 @@ const DEADLINE: Duration = Duration::from_secs(4);
 /// it finished without panicking (returning Ok or a graceful Err both count).
 fn run_once(id: &str, p: &Value) -> Option<bool> {
     let (tx, rx) = mpsc::channel();
-    let (id, p) = (id.to_string(), p.clone());
+    let (id, mut p) = (id.to_string(), p.clone());
     std::thread::spawn(move || {
         let r = catch_unwind(AssertUnwindSafe(|| {
+            if matches!(id.as_str(), "file.print" | "file.printOneCopy") {
+                // Exercise layout, PDF rendering and adversarial fields without sending
+                // test documents to a real OS print queue; transport has separate tests.
+                p.as_object_mut().expect("print fuzz fixtures must be objects").insert("dryRun".into(), json!(true));
+            }
             let mut s = fresh();
             let _ = s.execute(&id, p);
         }));

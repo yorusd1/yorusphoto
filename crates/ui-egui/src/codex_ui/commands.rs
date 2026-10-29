@@ -3,6 +3,8 @@
 use super::*;
 
 pub(super) const HELP: &[(&str, &str)] = &[
+    ("/account", "Show connected account and sign-in controls"),
+    ("/logout", "Sign out of the shared Codex session; keep saved chats"),
     ("/help", "Show available commands"),
     ("/status", "Show context, compaction and account usage"),
     ("/usage", "Refresh credit balance, limits and reset times"),
@@ -66,7 +68,9 @@ pub(super) fn try_run(app: &mut PhotocraftApp) -> Result<bool, String> {
     if !args.is_empty()
         && matches!(
             command,
-            "/help"
+            "/account"
+                | "/logout"
+                | "/help"
                 | "/?"
                 | "/status"
                 | "/usage"
@@ -93,6 +97,8 @@ pub(super) fn try_run(app: &mut PhotocraftApp) -> Result<bool, String> {
                 app.codex_runtime.show_workspace = true;
                 status(app, "Slash commands control this panel directly. Choose a command from Help.", false);
             }
+            "/account" => app.codex_runtime.show_account = true,
+            "/logout" => account::logout(app, false)?,
             "/status" => app.codex_runtime.show_workspace = true,
             "/usage" | "/limits" => {
                 app.codex_runtime.show_workspace = true;
@@ -187,6 +193,10 @@ pub(super) fn specs(app: &PhotocraftApp) -> Vec<Value> {
     let idle = chats::can_switch(app);
     let native = app.services.codex_workspace.is_some();
     [
+        ("codex.login", "Connect a ChatGPT account through Codex", "{}", account::can_change(app) && app.services.codex_login.is_some()),
+        ("codex.account", "Show the connected Codex account", "{}", true),
+        ("codex.logout", "Sign out of the shared Codex session, keeping saved chats", "{}", native && account::can_change(app)),
+        ("codex.account.switch", "Sign out and connect another ChatGPT account", "{}", native && account::can_change(app) && app.services.codex_login.is_some()),
         ("codex.status", "Inspect Codex context, limits and saved chats", "{}", true),
         ("codex.refresh", "Refresh Codex models and account usage", "{}", native),
         ("codex.compact", "Compact current Codex conversation", "{}", native && idle && app.ui.codex.thread_id.is_some()),

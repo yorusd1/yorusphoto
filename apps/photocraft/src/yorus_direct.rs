@@ -891,7 +891,11 @@ mod tests {
                         Err(error) => panic!("mock accept: {error}"),
                     }
                 };
+                // Windows accepted sockets inherit the listener's nonblocking mode.
+                // Read the HTTP request synchronously, bounded by the timeout.
+                socket.set_nonblocking(false).expect("blocking mock connection");
                 socket.set_read_timeout(Some(Duration::from_secs(10))).expect("mock timeout");
+                socket.set_write_timeout(Some(Duration::from_secs(10))).expect("mock write timeout");
                 let mut reader = BufReader::new(socket.try_clone().expect("mock clone"));
                 let mut line = String::new();
                 reader.read_line(&mut line).expect("request line");

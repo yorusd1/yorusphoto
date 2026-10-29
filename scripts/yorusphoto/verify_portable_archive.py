@@ -7,6 +7,8 @@ import json
 from pathlib import Path, PurePosixPath
 import zipfile
 
+from verify_release_privacy import verify_native_binaries
+
 
 def digest(path):
     with path.open("rb") as stream:
@@ -52,6 +54,8 @@ def main():
     args = parser.parse_args()
     package = args.package.resolve()
     archive = package.with_name(package.name + ".zip")
+    native_privacy = verify_native_binaries(package / name for name in ("yorusphoto.exe", "yorusphoto-cli.exe"))
+    assert native_privacy["passed"], "Native binaries contain private build paths or could not be verified; rebuild with remap-path-prefix"
     expected = {
         "yorusphoto.exe", "yorusphoto-cli.exe", "Start-yorusphoto.ps1", "Start-yorusphoto.cmd",
         "portable.txt", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md",
@@ -101,6 +105,7 @@ def main():
         "readmeHash": digest(package / "README.md"), "passed": True,
         "runtimeManifestVerified": (package / "codex/distribution-manifest.json").is_file(),
         "runtimeResourceLicenseCount": sum("/licenses/" in name for name in names),
+        "nativePrivacy": native_privacy,
     }
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

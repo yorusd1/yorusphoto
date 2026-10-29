@@ -8,7 +8,7 @@ A native Rust image editor with layers, masks, PSD support, an integrated Codex 
 
 ## Editing with AI
 
-- **Codex workspace:** ChatGPT sign-in, runtime-discovered models and reasoning settings, saved chats and drafts, slash commands, reported context usage, compaction status, account allowances and reset times. Stable Codex runtime updates are checked automatically.
+- **Codex workspace:** automatic detection of your ChatGPT account, account details, switch/sign-out controls, runtime-discovered models and reasoning settings, saved chats and drafts, slash commands, reported context usage, compaction status, account allowances and reset times. Stable Codex runtime updates are checked automatically.
 - **Image references:** attach up to four PNG, JPEG or WebP images in **Codex → Images**, preview/remove them, and use them alongside the selected region or to guide a new canvas.
 - **Selected-area generation:** the selected region becomes the base image reference. Results arrive on a separate layer at the captured position and dimensions, preserving the source layer and any newer selection.
 - **Whole-image generation:** results open in a separate canvas at the requested dimensions.
