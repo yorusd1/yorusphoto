@@ -1,6 +1,6 @@
 //! Runtime updates use native workers; versioned activation never cancels an editor task.
 
-use super::*;
+use super::{Arc, AtomicBool, Ordering, PhotocraftApp, Receiver, Sender, TryRecvError, Value, json, mpsc, unix_now, workspace};
 
 pub struct CodexUpdateRequest {
     pub force: bool,
@@ -183,7 +183,7 @@ pub(super) fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
         return;
     }
     let mut open = true;
-    egui::Window::new("Codex updates").id(egui::Id::new("codex-updates")).open(&mut open).default_width(420.0).show(ctx, |ui| {
+    egui::Window::new("Codex updates").id(egui::Id::unique("codex-updates")).open(&mut open).default_width(420.0).show(ctx, |ui| {
         settings_ui(app, ui);
     });
     app.codex_runtime.updates.show = open;
@@ -238,6 +238,7 @@ pub(super) fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use super::super::State;
     use super::*;
 
     #[test]

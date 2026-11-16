@@ -311,14 +311,24 @@ pub(super) fn rename(app: &mut PhotocraftApp, id: &str, title: &str) -> Result<(
     let chat = saved.chats.iter_mut().find(|chat| chat.id == id).ok_or("The requested saved chat was not found.")?;
     chat.title = title.into();
     chat.renamed = true;
-    commit(app, saved)
+    let thread = chat.thread_id.clone();
+    commit(app, saved)?;
+    if let Some(thread_id) = thread {
+        super::sync_thread(app, super::CodexWorkspaceAction::RenameThread { thread_id, name: title.into() });
+    }
+    Ok(())
 }
 
 pub(super) fn archive(app: &mut PhotocraftApp, id: &str, archived: bool) -> Result<(), String> {
     let mut saved = editable_snapshot(app)?;
     let chat = saved.chats.iter_mut().find(|chat| chat.id == id).ok_or("The requested saved chat was not found.")?;
     chat.archived = archived;
-    commit(app, saved)
+    let thread = chat.thread_id.clone();
+    commit(app, saved)?;
+    if let Some(thread_id) = thread {
+        super::sync_thread(app, super::CodexWorkspaceAction::ArchiveThread { thread_id, archived });
+    }
+    Ok(())
 }
 
 pub(super) fn inspect(app: &PhotocraftApp) -> Value {

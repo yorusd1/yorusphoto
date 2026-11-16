@@ -1,6 +1,6 @@
 //! Local slash commands: controls never become accidental model prompts.
 
-use super::*;
+use super::{CodexWorkspaceAction, MAX_MESSAGE_BYTES, PhotocraftApp, Value, account, chats, json, request_workspace, save_conversation, status, stop};
 
 pub(super) const HELP: &[(&str, &str)] = &[
     ("/account", "Show connected account and sign-in controls"),
@@ -280,6 +280,7 @@ pub(super) fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Arc, AtomicBool, Ordering, send_chat};
     use super::*;
 
     #[test]

@@ -25,6 +25,13 @@ foreach ($mapping in @(@($env:USERPROFILE, '/build-home'), @($repoPath, '/yorusp
     }
 }
 $env:CARGO_ENCODED_RUSTFLAGS = $publicFlags -join [char]31
+# The interface translations (craft-i18n at craft-i18n.rev): a release without them would be
+# English only, so a release build requires them.
+$i18nPath = Join-Path $repoPath '.toolchain\craft-i18n'
+if (-not $env:CRAFT_I18N_DIR -and (Test-Path -LiteralPath (Join-Path $i18nPath 'locales') -PathType Container)) {
+    $env:CRAFT_I18N_DIR = $i18nPath
+}
+if ($CargoArgs -contains '--release') { $env:CRAFT_I18N_REQUIRED = '1' }
 $env:CARGO_BUILD_JOBS = '8'
 Push-Location -LiteralPath $repoPath
 try {

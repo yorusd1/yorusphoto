@@ -173,6 +173,15 @@ if (-not $EguiFontsDirectory) {
         $candidate = Join-Path $registrySource.FullName ($fontPackageName + '\fonts')
         if (Test-Path -LiteralPath $candidate -PathType Container) { $EguiFontsDirectory = $candidate; break }
     }
+    # Since PhotoCraft 0.23.1 egui comes from upstream's git fork: Cargo's checkout of the locked commit.
+    $fontSourceMatch = [regex]::Match($lockText, '(?m)^name = "epaint_default_fonts"\r?\nversion = "[^"]+"\r?\nsource = "git\+[^#"]+#([0-9a-f]{7})[0-9a-f]*"')
+    if (-not $EguiFontsDirectory -and $fontSourceMatch.Success) {
+        $gitCheckouts = Join-Path $env:USERPROFILE '.cargo\git\checkouts'
+        foreach ($checkout in Get-ChildItem -LiteralPath $gitCheckouts -Directory -Filter 'egui-*' -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $checkout.FullName ($fontSourceMatch.Groups[1].Value + '\crates\epaint_default_fonts\fonts')
+            if (Test-Path -LiteralPath $candidate -PathType Container) { $EguiFontsDirectory = $candidate; break }
+        }
+    }
     if (-not $EguiFontsDirectory) { throw 'Cannot locate bundled egui font licenses; provide -EguiFontsDirectory from epaint_default_fonts.' }
 }
 $assetLicenses = @(

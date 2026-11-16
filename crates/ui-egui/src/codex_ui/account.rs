@@ -1,6 +1,6 @@
 //! Transient account identity. Never serialize this into preferences, chats or inspection.
 
-use super::*;
+use super::{CodexWorkspaceAction, Ordering, PhotocraftApp, Value, chats, request_workspace, start_login, status};
 
 #[derive(Default)]
 pub(super) struct Session {
@@ -208,6 +208,7 @@ pub(super) fn ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Arc, CodexLoginEvent, CodexWorkspaceEvent, apply_workspace_result, json, menu, poll, save_conversation, workspace_inspect};
     use super::*;
 
     fn signed_in(app: &mut PhotocraftApp) {

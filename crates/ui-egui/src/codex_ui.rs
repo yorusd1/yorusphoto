@@ -30,6 +30,10 @@ pub struct ImageGenerationRequest {
     pub cancel: Arc<AtomicBool>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Frames of a looping GIF (2 to 16), or a still image.
+    pub animation: Option<u32>,
+    /// Ask for a cutout on a transparent background.
+    pub transparent: bool,
 }
 
 pub struct CodexChatRequest {
@@ -40,6 +44,10 @@ pub struct CodexChatRequest {
     pub cancel: Arc<AtomicBool>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Let Codex's image tool make GIFs in this task.
+    pub animation: bool,
+    /// Messages typed while the task runs, added to it as Codex's own steering does.
+    pub steer: Option<Receiver<String>>,
 }
 
 pub enum CodexEvent {
@@ -50,6 +58,9 @@ pub enum CodexEvent {
     Finished,
     Error(String),
     Telemetry { kind: String, data: Value },
+    /// A message typed while the task ran that Codex never took (the turn ended first, or Codex
+    /// refused it): it goes back to the composer.
+    Unsent(String),
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +112,17 @@ pub type SaveCodexStateFn = Box<dyn Fn(&str) -> Result<(), String>>;
 
 const MAX_MESSAGE_BYTES: usize = 128 << 10;
 
+/// The flipbook grid an animation of `frames` is drawn on when Codex can't make a GIF: the
+/// smallest square number of columns, and the rows it needs (4 frames 2 x 2, 8 frames 3 x 3).
+pub fn flipbook_grid(frames: u32) -> (u32, u32) {
+    let frames = frames.clamp(1, 256);
+    let mut columns = 1;
+    while columns * columns < frames {
+        columns += 1;
+    }
+    (columns, frames.div_ceil(columns))
+}
+
 /// Restore only editor-owned conversations, never authentication or OAuth state.
 pub(crate) fn restore_conversation(app: &mut PhotocraftApp) {
     updates::restore_preferences(app);
@@ -134,6 +156,17 @@ pub struct State {
     pub messages: Vec<Message>,
     pub status: String,
     pub error: bool,
+    /// A result with more pixels than its selection or canvas enlarges the document instead of
+    /// being scaled down (`ai.apply` `"fit":"grow"`); the layer keeps its place and size.
+    pub grow_document: bool,
+    /// Ask Codex for an animation: the frames arrive as one layer per frame (a flipbook).
+    pub animation: bool,
+    /// Frames to ask for when `animation` is on.
+    pub animation_frames: u32,
+    /// A new canvas lays an animation's frames out as one flipbook sheet instead of layers.
+    pub flipbook_sheet: bool,
+    /// Ask for a cutout on a transparent background (sprites, icons, effect textures).
+    pub transparent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -165,6 +198,11 @@ impl Default for State {
             messages: Vec::new(),
             status: String::new(),
             error: false,
+            grow_document: true,
+            animation: false,
+            animation_frames: 8,
+            flipbook_sheet: false,
+            transparent: false,
         }
     }
 }
@@ -211,9 +249,22 @@ pub struct Runtime {
     pending_image: Option<Vec<u8>>,
     additional_images: std::collections::VecDeque<Vec<u8>>,
     waiting_tools: Vec<(photocraft_engine::jobs::JobId, Sender<Result<Value, String>>)>,
+    /// Messages for the running chat task (`turn/steer`).
+    steer: Option<Sender<String>>,
+    /// The running request asked for an animation.
+    animation_requested: bool,
+    /// The flipbook grid (columns, rows, frames) Codex was asked to draw a still sheet on if it
+    /// can't make a GIF; such a still is cut into its frames on placement.
+    animation_grid: Option<(u32, u32, u32)>,
+    /// The workspace action running keeps a saved chat's Codex thread in step (`sync_thread`).
+    thread_sync: bool,
 }
 
 impl Runtime {
+    /// A chat task is running and takes more messages.
+    pub fn steerable(&self) -> bool {
+        self.chat_rx.is_some() && self.steer.is_some()
+    }
     pub fn busy(&self) -> bool {
         self.image_rx.is_some()
             || self.chat_rx.is_some()
@@ -269,10 +320,13 @@ fn capture(app: &mut PhotocraftApp, use_selection: bool) -> Result<Option<Vec<u8
 fn apply_image(app: &mut PhotocraftApp, bytes: &[u8]) -> Result<Value, String> {
     let p = app.codex_runtime.placement.as_ref().ok_or("No saved image destination")?;
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let fit = if app.ui.codex.grow_document { "grow" } else { "exact" };
+    let frames = if app.ui.codex.flipbook_sheet { "sheet" } else { "layers" };
+    let grid = app.codex_runtime.animation_grid.map(|(columns, rows, count)| json!({"columns":columns,"rows":rows,"count":count}));
     let (command, params, source_document) = if let Some(target) = &p.target {
-        ("ai.apply", json!({"target":target, "data":data, "name":p.name}), target.get("document").and_then(Value::as_u64))
+        ("ai.apply", json!({"target":target, "data":data, "name":p.name, "fit":fit, "grid":grid}), target.get("document").and_then(Value::as_u64))
     } else {
-        ("ai.open", json!({"data":data, "name":p.name, "width":p.width, "height":p.height}), None)
+        ("ai.open", json!({"data":data, "name":p.name, "width":p.width, "height":p.height, "frames":frames, "grid":grid}), None)
     };
     let previous = app.session.active_index();
     if let Some(id) = source_document {
@@ -290,6 +344,13 @@ fn apply_image(app: &mut PhotocraftApp, bytes: &[u8]) -> Result<Value, String> {
         app.session.set_active(index);
     }
     app.sync_views();
+    // A grown document has a new size: later results of this request use the new target.
+    if let Ok(value) = &result
+        && let Some(target) = value.get("target")
+        && let Some(placement) = app.codex_runtime.placement.as_mut()
+    {
+        placement.target = Some(target.clone());
+    }
     result
 }
 
@@ -303,15 +364,41 @@ fn receive_image(app: &mut PhotocraftApp, bytes: Vec<u8>) {
         return;
     }
     match apply_image(app, &bytes) {
-        Ok(_) => {
+        Ok(value) => {
             let selected = app.codex_runtime.placement.as_ref().is_some_and(|p| p.target.is_some());
-            status(app, if selected { "Image added as a separate layer at the captured selection." } else { "Image opened in a new canvas." }, false);
+            let frames = value.get("frames").and_then(Value::as_u64).unwrap_or(1);
+            let mut message = match (selected, frames > 1) {
+                (true, false) => "Image added as a separate layer at the captured selection.".to_owned(),
+                (true, true) => format!("Animation added as {frames} frame layers at the captured selection; the first is shown."),
+                (false, false) => "Image opened in a new canvas.".to_owned(),
+                (false, true) => format!("Animation opened in a new canvas with {frames} frames."),
+            };
+            if let Some(grown) = value.get("grown") {
+                let size = |key: &str| grown.get(key).and_then(Value::as_u64).unwrap_or(0);
+                message.push_str(&format!(" The canvas grew to {} × {} px to keep every generated pixel.", size("width"), size("height")));
+            }
+            if frames < 2 && app.codex_runtime.animation_requested && app.codex_runtime.image_rx.is_none() {
+                message.push_str(" Codex returned a still image: GIF output needs Codex 0.169 or later and may not be on for every account yet.");
+            }
+            status(app, message, false);
         }
         Err(e) => {
             app.codex_runtime.pending_image = Some(bytes);
             status(app, format!("Image ready; placement needs attention: {e}"), true);
         }
     }
+}
+
+/// A message Codex did not take goes back to the composer, after anything typed since.
+fn restore_unsent(app: &mut PhotocraftApp, text: String) {
+    let draft = &mut app.ui.codex.chat_prompt;
+    if draft.trim().is_empty() {
+        *draft = text;
+    } else if draft.len().saturating_add(text.len()) < MAX_MESSAGE_BYTES {
+        draft.push_str("\n\n");
+        draft.push_str(&text);
+    }
+    status(app, "Codex did not take your last message; it is back in the box to send again.", true);
 }
 
 fn recover_next_image(app: &mut PhotocraftApp) {
@@ -372,20 +459,53 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<(), String> {
         cancel: cancel.clone(),
         model: s.model.clone(),
         reasoning_effort: s.reasoning_effort.clone(),
+        animation: s.animation.then_some(s.animation_frames.clamp(2, 16)),
+        transparent: s.transparent,
     };
+    let animation = req.animation.is_some();
+    let req_frames = req.animation;
     let (tx, rx) = mpsc::channel();
     if let Some(run) = &app.services.generate_image {
         run(req, tx);
     }
     app.codex_runtime.image_rx = Some(rx);
     app.codex_runtime.cancel = Some(cancel);
-    status(app, "Generating with Codex using your ChatGPT accountâ€¦", false);
+    app.codex_runtime.animation_requested = animation;
+    app.codex_runtime.animation_grid = req_frames.map(|frames| {
+        let (columns, rows) = flipbook_grid(frames);
+        (columns, rows, frames)
+    });
+    status(app, if animation { "Generating an animation with Codex using your ChatGPT account…" } else { "Generating with Codex using your ChatGPT account…" }, false);
+    Ok(())
+}
+
+/// Add a message to the running chat task, as typing while Codex works does in Codex.
+fn steer_chat(app: &mut PhotocraftApp) -> Result<(), String> {
+    let prompt = app.ui.codex.chat_prompt.trim().to_owned();
+    if prompt.is_empty() {
+        return Err("Enter a message for Codex".into());
+    }
+    if prompt.len() > MAX_MESSAGE_BYTES {
+        return Err("The message exceeds the 128 KiB limit.".into());
+    }
+    let sender = app.codex_runtime.steer.as_ref().ok_or("No Codex task is running.")?;
+    sender.send(prompt.clone()).map_err(|_| "The Codex task already finished; send the message again.".to_owned())?;
+    app.ui.codex.chat_prompt.clear();
+    app.ui.codex.messages.push(Message { role: "You".into(), text: prompt });
+    app.ui.codex.messages.push(Message { role: "Codex".into(), text: String::new() });
+    if app.ui.codex.messages.len() > 100 {
+        app.ui.codex.messages.drain(..2);
+    }
+    status(app, "Added to the running task.", false);
     Ok(())
 }
 
 pub fn send_chat(app: &mut PhotocraftApp) -> Result<(), String> {
     if commands::try_run(app)? {
         return Ok(());
+    }
+    if app.codex_runtime.steerable() {
+        return steer_chat(app);
     }
     if app.codex_runtime.busy() || app.codex_runtime.login_rx.is_some() || app.yorus_ai_runtime.busy() {
         return Err("A Codex task is already running".into());
@@ -420,7 +540,11 @@ pub fn send_chat(app: &mut PhotocraftApp) -> Result<(), String> {
         cancel: cancel.clone(),
         model: app.ui.codex.model.clone(),
         reasoning_effort: app.ui.codex.reasoning_effort.clone(),
+        animation: app.ui.codex.animation,
+        steer: None,
     };
+    let (steer_tx, steer_rx) = mpsc::channel();
+    let req = CodexChatRequest { steer: Some(steer_rx), ..req };
     let (event_tx, event_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
     if let Some(run) = &app.services.codex_chat {
@@ -429,13 +553,17 @@ pub fn send_chat(app: &mut PhotocraftApp) -> Result<(), String> {
     app.codex_runtime.chat_rx = Some(event_rx);
     app.codex_runtime.command_rx = Some(command_rx);
     app.codex_runtime.cancel = Some(cancel);
+    app.codex_runtime.steer = Some(steer_tx);
+    app.codex_runtime.animation_requested = app.ui.codex.animation;
+    // A chat's images are placed as they come: Codex chose their layout.
+    app.codex_runtime.animation_grid = None;
     app.ui.codex.chat_prompt.clear();
     app.ui.codex.messages.push(Message { role: "You".into(), text: prompt });
     app.ui.codex.messages.push(Message { role: "Codex".into(), text: String::new() });
     if app.ui.codex.messages.len() > 100 {
         app.ui.codex.messages.drain(..2);
     }
-    status(app, "Codex is working on your taskâ€¦", false);
+    status(app, "Codex is working on your task…", false);
     Ok(())
 }
 
@@ -529,10 +657,12 @@ fn poll(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 }
             }
             Some(Ok(CodexEvent::Status(text))) => status(app, text, false),
+            Some(Ok(CodexEvent::Unsent(text))) => restore_unsent(app, text),
             Some(Ok(CodexEvent::Image(bytes))) => receive_image(app, bytes),
             Some(Ok(CodexEvent::Finished)) => {
                 app.codex_runtime.chat_rx = None;
                 app.codex_runtime.command_rx = None;
+                app.codex_runtime.steer = None;
                 if !app.ui.codex.error {
                     status(app, "Task finished.", false);
                 }
@@ -545,6 +675,7 @@ fn poll(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 stop_tool(app);
                 app.codex_runtime.chat_rx = None;
                 app.codex_runtime.command_rx = None;
+                app.codex_runtime.steer = None;
                 status(app, text, true);
                 break;
             }
@@ -552,6 +683,7 @@ fn poll(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 stop_tool(app);
                 app.codex_runtime.chat_rx = None;
                 app.codex_runtime.command_rx = None;
+                app.codex_runtime.steer = None;
                 if app.codex_runtime.workspace.compaction == workspace::Compaction::Running {
                     app.codex_runtime
                         .workspace
@@ -646,6 +778,15 @@ fn apply_telemetry(app: &mut PhotocraftApp, kind: &str, data: &Value) {
             }
             Ok(())
         }
+        "rerouted" => {
+            let to = data.get("toModel").and_then(Value::as_str).unwrap_or("another model");
+            let message = match data.get("fromModel").and_then(Value::as_str) {
+                Some(from) => format!("Codex answered this turn with {to} instead of {from}. Your model choice is unchanged."),
+                None => format!("Codex answered this turn with {to}. Your model choice is unchanged."),
+            };
+            status(app, message, false);
+            Ok(())
+        }
         _ => return,
     };
     if let Err(error) = result {
@@ -682,12 +823,29 @@ fn request_workspace(app: &mut PhotocraftApp, action: CodexWorkspaceAction) -> R
     Ok(())
 }
 
+/// Keep a saved chat's Codex thread in step with a rename or archive made in the editor, as the
+/// Codex app does. Best effort: the editor's own copy is already saved, so a busy workspace skips
+/// it and a refusal is only noted.
+pub(super) fn sync_thread(app: &mut PhotocraftApp, action: CodexWorkspaceAction) {
+    if app.services.codex_workspace.is_some() && request_workspace(app, action).is_ok() {
+        app.codex_runtime.thread_sync = true;
+    }
+}
+
 fn poll_workspace(app: &mut PhotocraftApp) {
     for _ in 0..32 {
         let event = app.codex_runtime.workspace_rx.as_ref().map(Receiver::try_recv);
         match event {
             Some(Ok(CodexWorkspaceEvent::Telemetry { kind, data })) => apply_telemetry(app, &kind, &data),
+            Some(Ok(CodexWorkspaceEvent::Error(error))) if std::mem::take(&mut app.codex_runtime.thread_sync) => {
+                app.codex_runtime.workspace_rx = None;
+                app.codex_runtime.workspace_action = None;
+                app.codex_runtime.workspace_cancel = None;
+                status(app, format!("Saved in the editor. Codex's copy of this chat was not updated: {error}"), false);
+                break;
+            }
             Some(Ok(CodexWorkspaceEvent::Result(data))) => {
+                app.codex_runtime.thread_sync = false;
                 app.codex_runtime.workspace_rx = None;
                 app.codex_runtime.workspace_cancel = None;
                 let action = app.codex_runtime.workspace_action.take();
@@ -825,7 +983,7 @@ fn workspace_windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if app.codex_runtime.show_workspace {
         let mut open = true;
         let mut actions = Vec::new();
-        egui::Window::new("Codex status and usage").id(egui::Id::new("codex-workspace-status")).open(&mut open).default_width(430.0).show(ctx, |ui| {
+        egui::Window::new("Codex status and usage").id(egui::Id::unique("codex-workspace-status")).open(&mut open).default_width(430.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
                 actions = workspace::usage_ui(ui, &app.codex_runtime.workspace, unix_now());
                 if let Some(error) = &app.codex_runtime.workspace_error {
@@ -844,7 +1002,7 @@ fn workspace_windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let mut effort = app.ui.codex.reasoning_effort.clone();
         let mut changed = false;
         let mut refresh = false;
-        egui::Window::new("Codex model").id(egui::Id::new("codex-model-picker")).open(&mut open).default_width(360.0).show(ctx, |ui| {
+        egui::Window::new("Codex model").id(egui::Id::unique("codex-model-picker")).open(&mut open).default_width(360.0).show(ctx, |ui| {
             changed = workspace::model_ui(ui, &app.codex_runtime.workspace, &mut model, &mut effort, app.codex_runtime.busy());
             refresh = ui.button("Refresh available models").clicked();
         });
@@ -859,7 +1017,7 @@ fn workspace_windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if app.codex_runtime.remote_browser {
         let mut open = true;
         let mut action = None;
-        egui::Window::new("Saved Codex threads").id(egui::Id::new("codex-remote-threads")).open(&mut open).default_width(450.0).show(ctx, |ui| {
+        egui::Window::new("Saved Codex threads").id(egui::Id::unique("codex-remote-threads")).open(&mut open).default_width(450.0).show(ctx, |ui| {
             ui.small("Threads created by this editor. Opening imports their saved text and resumes the same Codex thread.");
             if ui.add_enabled(app.codex_runtime.workspace_rx.is_none(), egui::Button::new("Refresh threads")).clicked() {
                 action = Some(CodexWorkspaceAction::ListThreads { cursor: None, archived: false, search: None });
@@ -940,8 +1098,8 @@ pub(crate) fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
     let available = app.services.generate_image.is_some();
     let idle = !app.codex_runtime.busy() && !app.yorus_ai_runtime.busy() && app.codex_runtime.login_rx.is_none();
     let mut specs: Vec<Value> = [
-        ("ai.generate", "Generate image with Codex", r#"{prompt?:string,mode?:"selection"|"canvas",quality?:"low"|"medium"|"high",width?:1..3840,height?:1..3840}; omit prompt to open Images. Quality and generation size are preferences; final placement is exact."#, available && idle),
-        ("codex.send", "Send an editor task to Codex", r#"{prompt:string}; uses current Selected area setting. Starts asynchronously; inspect codexBusy and codex status via ui_inspect."#, app.services.codex_chat.is_some() && idle),
+        ("ai.generate", "Generate image with Codex", r#"{prompt?:string,mode?:"selection"|"canvas",quality?:"low"|"medium"|"high",width?:1..3840,height?:1..3840,animation?:false|2..16 (a looping GIF: one layer per frame),transparent?:bool (a cutout on a transparent background),fit?:"grow"|"exact" (selection mode: grow the whole canvas when the result has more pixels than the selection, or scale the result into it),frames?:"layers"|"sheet" (canvas mode: an animation's frames as layers or one flipbook sheet)}; omit prompt to open Images. Quality and generation size are preferences; final placement is exact."#, available && idle),
+        ("codex.send", "Send an editor task to Codex", r#"{prompt:string}; uses current Selected area setting. Starts asynchronously; while a task runs, adds the message to it. Inspect codexBusy and codex status via ui_inspect."#, app.services.codex_chat.is_some() && (idle || app.codex_runtime.steerable())),
         ("codex.cancel", "Stop Codex task", "{}", app.codex_runtime.busy()),
     ].into_iter().map(|(id,label,params,enabled)| json!({"id":id,"label":label,"params":params,"menu":[],"shortcut":null,
         "enabled":enabled,"disabledReason":if enabled {Value::Null} else {json!("Codex service unavailable, busy, or no active task to stop")},"needsDocument":false})).collect();
@@ -1016,6 +1174,31 @@ fn configure_generation(app: &mut PhotocraftApp, params: &Value) -> Result<(), S
             *output = value.as_u64().filter(|v| (1..=3840).contains(v)).ok_or("width and height must be integers between 1 and 3840")? as u32;
         }
     }
+    match params.get("animation") {
+        None => {}
+        Some(Value::Bool(false)) => settings.animation = false,
+        Some(value) => {
+            settings.animation_frames = value.as_u64().filter(|v| (2..=16).contains(v)).ok_or("animation must be false or a frame count from 2 to 16")? as u32;
+            settings.animation = true;
+        }
+    }
+    if let Some(value) = params.get("transparent") {
+        settings.transparent = value.as_bool().ok_or("transparent must be true or false")?;
+    }
+    if let Some(value) = params.get("fit") {
+        settings.grow_document = match value.as_str() {
+            Some("grow") => true,
+            Some("exact") => false,
+            _ => return Err("fit must be grow or exact".into()),
+        };
+    }
+    if let Some(value) = params.get("frames") {
+        settings.flipbook_sheet = match value.as_str() {
+            Some("sheet") => true,
+            Some("layers") => false,
+            _ => return Err("frames must be layers or sheet".into()),
+        };
+    }
     settings.open = true;
     settings.images_tab = true;
     app.ui.codex = settings;
@@ -1059,7 +1242,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_millis(60));
     }
     let mut open = app.codex_runtime.show_account;
-    egui::Window::new("ChatGPT account").id(egui::Id::new("codex-account")).open(&mut open).resizable(false).show(ctx, |ui| connection_ui(app, ui));
+    egui::Window::new("ChatGPT account").id(egui::Id::unique("codex-account")).open(&mut open).resizable(false).show(ctx, |ui| connection_ui(app, ui));
     app.codex_runtime.show_account = open;
     workspace_windows(app, ctx);
     updates::window(app, ctx);
@@ -1257,6 +1440,23 @@ fn images_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     } else {
         ui.label(egui::RichText::new("The result opens in a separate canvas.").small().color(t.text_dim));
     }
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut app.ui.codex.animation, egui::RichText::new("Animation (GIF)").small())
+            .on_hover_text("Codex makes a looping GIF; each frame is placed as its own layer, ready for a flipbook.");
+        if app.ui.codex.animation {
+            ui.add(egui::DragValue::new(&mut app.ui.codex.animation_frames).range(2..=16).suffix(" frames"));
+        }
+        ui.checkbox(&mut app.ui.codex.transparent, egui::RichText::new("Transparent").small())
+            .on_hover_text("A cutout on a transparent background: sprites, icons, effect textures.");
+    });
+    if selected {
+        ui.checkbox(&mut app.ui.codex.grow_document, egui::RichText::new("Grow canvas to fit").small()).on_hover_text(
+            "When the result has more pixels than the selection, enlarge the whole canvas instead of shrinking the result. The layer keeps its place and size.",
+        );
+    } else if app.ui.codex.animation {
+        ui.checkbox(&mut app.ui.codex.flipbook_sheet, egui::RichText::new("Frames as one flipbook sheet").small())
+            .on_hover_text("Lay the frames out in a grid on one canvas (a sprite sheet) instead of one layer per frame.");
+    }
     ui.add_space(4.0);
     references::show(app, ui);
     egui::Frame::new().fill(t.field).corner_radius(18.0).inner_margin(12).show(ui, |ui| {
@@ -1292,7 +1492,7 @@ fn images_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Ratio").small().color(t.text_dim));
-        egui::ComboBox::from_id_salt("generation-ratio").width(84.0).selected_text(&app.ui.codex.ratio).show_ui(ui, |ui| {
+        craft_ui::ComboBox::from_id_salt("generation-ratio").width(84.0).selected_text(app.ui.codex.ratio.as_str()).show_ui(ui, |ui| {
             for ratio in ["Selection", "1:1", "4:3", "3:4", "16:9", "9:16"] {
                 ui.selectable_value(&mut app.ui.codex.ratio, ratio.into(), ratio);
             }
@@ -1320,7 +1520,7 @@ fn images_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     });
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Quality preference").small().color(t.text_dim));
-        egui::ComboBox::from_id_salt("generation-quality").width(76.0).selected_text(&app.ui.codex.quality).show_ui(ui, |ui| {
+        craft_ui::ComboBox::from_id_salt("generation-quality").width(76.0).selected_text(app.ui.codex.quality.as_str()).show_ui(ui, |ui| {
             for quality in ["low", "medium", "high"] {
                 ui.selectable_value(&mut app.ui.codex.quality, quality.into(), quality);
             }
@@ -1334,7 +1534,7 @@ fn images_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             ui.add(egui::DragValue::new(&mut app.ui.codex.height).range(64..=3840).suffix(" px"));
         }
     });
-    ui.small(egui::RichText::new("Codex chooses native quality and size automatically. Final layer and canvas dimensions stay exact.").color(t.text_faint));
+    ui.small(egui::RichText::new("Codex chooses native quality and size automatically. The result keeps the captured place and size; Grow canvas to fit enlarges the whole canvas rather than shrink a bigger result.").color(t.text_faint));
     if busy {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1411,9 +1611,10 @@ fn chat_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, height: f32) {
         );
         let submit = response.has_focus() && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
         let slash = app.ui.codex.chat_prompt.trim_start().starts_with('/');
+        let steerable = app.codex_runtime.steerable();
         let enabled = app.services.codex_chat.is_some()
             && !app.ui.codex.chat_prompt.trim().is_empty()
-            && (!busy || slash)
+            && (!busy || slash || steerable)
             && !app.yorus_ai_runtime.busy()
             && app.codex_runtime.login_rx.is_none();
         let mut send = submit && enabled;
@@ -1430,10 +1631,17 @@ fn chat_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, height: f32) {
             .on_hover_text("Codex commands");
             ui.checkbox(&mut app.ui.codex.selection_reference, egui::RichText::new("Selected area").small())
                 .on_hover_text("Use selected pixels as the reference and fixed layer destination. Uncheck to open generated images in a new canvas.");
+            ui.add_enabled_ui(!busy, |ui| {
+                ui.checkbox(&mut app.ui.codex.animation, egui::RichText::new("GIF").small())
+                    .on_hover_text("Let Codex make animated GIFs in this task; each frame is placed as its own layer.");
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if busy && !slash {
                     if crate::ai_sidebar::send_button(ui, "square", true, "Stop task").clicked() {
                         stop(app);
+                    }
+                    if steerable && !app.ui.codex.chat_prompt.trim().is_empty() {
+                        send |= crate::ai_sidebar::send_button(ui, "arrow-up", enabled, "Add to the running task · Ctrl+Enter").clicked();
                     }
                 } else {
                     send |= crate::ai_sidebar::send_button(ui, "arrow-up", enabled, "Send task · Ctrl+Enter").clicked();
@@ -1895,6 +2103,158 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert!(app.codex_runtime.waiting_tools.is_empty());
+    }
+
+    /// An animated GIF: `colours.len()` solid frames of `width` x `height`.
+    fn gif(width: u32, height: u32, colours: &[[u8; 3]]) -> Vec<u8> {
+        let frames: Vec<photocraft_codecs::web::GifFrame> = colours
+            .iter()
+            .map(|rgb| photocraft_codecs::web::GifFrame { indices: vec![0; (width * height) as usize], palette: vec![*rgb], transparent: None, delay_cs: 10 })
+            .collect();
+        photocraft_codecs::web::encode_gif_animated(width, height, &frames, true).unwrap()
+    }
+
+    #[test]
+    fn an_animation_places_one_layer_per_frame_and_grows_the_canvas_for_its_pixels() {
+        let services = crate::Services {
+            generate_image: Some(Box::new(|req, reply| {
+                assert_eq!(req.animation, Some(4));
+                assert!(req.transparent);
+                // 48 x 40 frames for a 12 x 10 selection: the canvas grows four times.
+                reply.send(Ok(gif(48, 40, &[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]))).unwrap();
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.run("file.new", json!({"width":40,"height":30})).unwrap();
+        app.run("select.rect", json!({"x":5,"y":7,"width":12,"height":10})).unwrap();
+        app.ui.codex.prompt = "a flickering torch".into();
+        app.ui.codex.animation = true;
+        app.ui.codex.animation_frames = 4;
+        app.ui.codex.transparent = true;
+        generate(&mut app).unwrap();
+        poll(&mut app, &egui::Context::default());
+        assert!(!app.ui.codex.error, "{}", app.ui.codex.status);
+        assert!(app.ui.codex.status.contains("4 frame layers") && app.ui.codex.status.contains("grew"), "{}", app.ui.codex.status);
+        let d = app.session.active().unwrap();
+        assert_eq!((d.doc.size.width, d.doc.size.height), (160, 120));
+        assert_eq!(d.doc.layers.len(), 5);
+        for layer in &d.doc.layers[1..] {
+            assert_eq!(layer.surface().unwrap().content_bounds(), photocraft_geom::Rect::new(20, 28, 68, 68));
+        }
+        assert_eq!(d.doc.layers[1..].iter().filter(|layer| layer.visible).count(), 1, "only the first frame shows");
+    }
+
+    #[test]
+    fn a_still_sheet_drawn_in_place_of_a_gif_becomes_frame_layers() {
+        assert_eq!(flipbook_grid(4), (2, 2));
+        assert_eq!(flipbook_grid(8), (3, 3));
+        assert_eq!(flipbook_grid(6), (3, 2));
+        assert_eq!(flipbook_grid(16), (4, 4));
+        let services = crate::Services {
+            generate_image: Some(Box::new(|req, reply| {
+                assert_eq!(req.animation, Some(4));
+                // Codex couldn't make a GIF and drew the four frames as a 2 x 2 still.
+                let mut pixels = Vec::new();
+                for y in 0..24 {
+                    for x in 0..24 {
+                        pixels.extend(match (x < 12, y < 12) {
+                            (true, true) => [255, 0, 0, 255],
+                            (false, true) => [0, 255, 0, 255],
+                            (true, false) => [0, 0, 255, 255],
+                            (false, false) => [255, 255, 0, 255],
+                        });
+                    }
+                }
+                let image = photocraft_codecs::Image::from_u8(24, 24, photocraft_codecs::ChannelLayout::Rgba, pixels).unwrap();
+                reply.send(Ok(photocraft_codecs::encode(&image, photocraft_codecs::Format::Png, &Default::default()).unwrap())).unwrap();
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.run("file.new", json!({"width":40,"height":30})).unwrap();
+        app.run("select.rect", json!({"x":5,"y":7,"width":12,"height":12})).unwrap();
+        app.ui.codex.prompt = "a flickering torch".into();
+        app.ui.codex.animation = true;
+        app.ui.codex.animation_frames = 4;
+        generate(&mut app).unwrap();
+        poll(&mut app, &egui::Context::default());
+        assert!(!app.ui.codex.error, "{}", app.ui.codex.status);
+        assert!(app.ui.codex.status.contains("4 frame layers"), "{}", app.ui.codex.status);
+        let d = app.session.active().unwrap();
+        assert_eq!(d.doc.layers.len(), 5);
+        let colour = |index: usize| d.doc.layers[index].surface().unwrap().rgba(8, 10);
+        assert!(colour(1)[0] > 0.9 && colour(2)[1] > 0.9 && colour(3)[2] > 0.9, "the cells in reading order, bottom to top");
+    }
+
+    #[test]
+    fn exact_fit_scales_a_bigger_result_into_the_selection() {
+        let services = crate::Services { generate_image: Some(Box::new(|_, reply| reply.send(Ok(gif(48, 40, &[[255, 0, 0]]))).unwrap())), ..Default::default() };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.run("file.new", json!({"width":40,"height":30})).unwrap();
+        app.run("select.rect", json!({"x":5,"y":7,"width":12,"height":10})).unwrap();
+        app.ui.codex.prompt = "a red tile".into();
+        app.ui.codex.grow_document = false;
+        generate(&mut app).unwrap();
+        poll(&mut app, &egui::Context::default());
+        assert!(!app.ui.codex.error, "{}", app.ui.codex.status);
+        let d = app.session.active().unwrap();
+        assert_eq!((d.doc.size.width, d.doc.size.height), (40, 30));
+        assert_eq!(d.doc.layers[1].surface().unwrap().content_bounds(), photocraft_geom::Rect::new(5, 7, 17, 17));
+    }
+
+    #[test]
+    fn automation_sets_animation_transparency_fit_and_flipbook_layout() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        configure_generation(&mut app, &json!({"prompt":"coins","animation":6,"transparent":true,"fit":"exact","frames":"sheet"})).unwrap();
+        let s = &app.ui.codex;
+        assert!(s.animation && s.transparent && !s.grow_document && s.flipbook_sheet);
+        assert_eq!(s.animation_frames, 6);
+        configure_generation(&mut app, &json!({"prompt":"coins","animation":false})).unwrap();
+        assert!(!app.ui.codex.animation);
+        for bad in [json!({"prompt":"x","animation":1}), json!({"prompt":"x","animation":17}), json!({"prompt":"x","fit":"stretch"}), json!({"prompt":"x","frames":"grid"})] {
+            assert!(configure_generation(&mut app, &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_message_sent_while_a_task_runs_joins_it() {
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let keep = held.clone();
+        let services = crate::Services {
+            codex_chat: Some(Box::new(move |request, events, _| {
+                assert!(request.animation);
+                *keep.lock().unwrap() = Some((request.steer.expect("a steering channel"), events));
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(Default::default(), services);
+        app.ui.codex.animation = true;
+        app.ui.codex.chat_prompt = "Make a torch sprite".into();
+        send_chat(&mut app).unwrap();
+        assert!(app.codex_runtime.steerable());
+        app.ui.codex.chat_prompt = "Make it blue".into();
+        send_chat(&mut app).unwrap();
+        let (steer, events) = held.lock().unwrap().take().unwrap();
+        assert_eq!(steer.try_recv().unwrap(), "Make it blue");
+        assert_eq!(app.ui.codex.messages.iter().filter(|m| m.role == "You").count(), 2);
+        assert!(app.ui.codex.chat_prompt.is_empty());
+        // A message the turn ended before taking comes back to the composer.
+        events.send(CodexEvent::Unsent("Make it blue".into())).unwrap();
+        events.send(CodexEvent::Finished).unwrap();
+        poll(&mut app, &egui::Context::default());
+        assert!(!app.codex_runtime.steerable() && !app.codex_runtime.busy());
+        assert_eq!(app.ui.codex.chat_prompt, "Make it blue");
+        assert!(app.ui.codex.error && app.ui.codex.status.contains("send again"), "{}", app.ui.codex.status);
+    }
+
+    #[test]
+    fn a_reroute_is_reported_without_changing_the_chosen_model() {
+        let mut app = PhotocraftApp::new(Default::default(), Default::default());
+        app.ui.codex.model = Some("chosen-model".into());
+        apply_telemetry(&mut app, "rerouted", &json!({"toModel":"safer-model","fromModel":"chosen-model"}));
+        assert_eq!(app.ui.codex.model.as_deref(), Some("chosen-model"));
+        assert!(app.ui.codex.status.contains("safer-model"), "{}", app.ui.codex.status);
     }
 
     #[test]

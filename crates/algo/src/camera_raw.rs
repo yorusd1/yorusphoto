@@ -55,13 +55,16 @@ pub fn validate_curve(points: &[[f32; 2]]) -> Result<(), String> {
 
 use crate::photo_util::{hash01, linear_to_srgb, par_rows, srgb_to_linear};
 
-mod auto;
-mod local_tone;
-mod transfer;
+pub mod local_tone;
+mod per_pixel;
+pub mod spatial;
 mod whites_blacks;
 
-pub use auto::{auto_tone, auto_white_balance, neutral_white_balance};
-use transfer::Lut;
+pub use local_tone::{LocalTone, ToneKind, TonePass};
+pub use per_pixel::{
+    CURVE_LUT, Grade, Grain, PerPixel, Vignette, VignetteStyle, WB_STEPS, WhitesBlacks, WhitesBlacksModel, per_pixel, white_black_points, whites_blacks_model,
+};
+pub use spatial::{Clarity, Dehaze, Texture};
 
 /// How the pixels encode light: the sRGB curve (gamma 0) or a pure power law (ProPhoto's 1.8,
 /// Adobe RGB's 2.2). The tone controls work on light, so the document's own curve decodes it.
@@ -72,20 +75,14 @@ impl Encoding {
     pub(crate) fn of(gamma: f32) -> Self {
         Encoding(if gamma.is_finite() && gamma > 0.0 { gamma.clamp(0.5, 4.0) } else { 0.0 })
     }
+    /// A value in this encoding as linear light.
     pub(crate) fn decode(self, v: f32) -> f32 {
         if self.0 > 0.0 { v.max(0.0).powf(self.0) } else { srgb_to_linear(v) }
     }
+    /// Linear light back into this encoding, the inverse of [`Encoding::decode`].
     pub(crate) fn encode(self, v: f32) -> f32 {
         if self.0 > 0.0 { v.max(0.0).powf(1.0 / self.0) } else { linear_to_srgb(v) }
     }
-}
-
-fn srgb_encode(v: f32) -> f32 {
-    linear_to_srgb(v)
-}
-
-fn srgb_decode(v: f32) -> f32 {
-    srgb_to_linear(v)
 }
 
 fn luma_linear(c: [f32; 3]) -> f32 {
@@ -151,20 +148,6 @@ pub struct CameraRaw {
     pub grade_global: Wheel,
     pub grade_blending: f32,
     pub grade_balance: f32,
-    /// Treatment: Black & White develops to grey through [`bw_mix`](Self::bw_mix) (Vibrance,
-    /// Saturation and the HSL mixer then have no effect; Color Grading still tints).
-    pub black_and_white: bool,
-    /// B&W Mix per Color Mixer band (−100 … 100): how light each colour turns in grey.
-    pub bw_mix: [f32; 8],
-    // Calibration (−100 … 100): the shadows' green–magenta tint and each primary's hue and
-    // saturation, applied in linear light before the colour stages.
-    pub calibration_shadows_tint: f32,
-    pub calibration_red_hue: f32,
-    pub calibration_red_sat: f32,
-    pub calibration_green_hue: f32,
-    pub calibration_green_sat: f32,
-    pub calibration_blue_hue: f32,
-    pub calibration_blue_sat: f32,
     // Detail
     pub sharpen_amount: f32,
     pub sharpen_radius: f32,
@@ -191,6 +174,13 @@ pub struct CameraRaw {
     /// The document's transfer curve: 0 for sRGB's, else the gamma of a power-law space (1.8
     /// for ProPhoto). Set from the document's profile; Whites and Blacks act on light.
     pub encoding_gamma: f32,
+    // Calibration (Camera Raw's Calibration panel)
+    /// Shadows › Tint: −100 (green) … 100 (magenta), strongest in the darkest tones.
+    pub shadow_tint: f32,
+    /// Red, Green and Blue Primary › Hue: −100 … 100, the primary turned towards its neighbours.
+    pub calibration_hue: [f32; 3],
+    /// Red, Green and Blue Primary › Saturation: −100 (grey) … 100 (purer).
+    pub calibration_sat: [f32; 3],
 }
 
 impl Default for CameraRaw {
@@ -227,15 +217,6 @@ impl Default for CameraRaw {
             grade_global: Wheel::default(),
             grade_blending: 50.0,
             grade_balance: 0.0,
-            black_and_white: false,
-            bw_mix: [0.0; 8],
-            calibration_shadows_tint: 0.0,
-            calibration_red_hue: 0.0,
-            calibration_red_sat: 0.0,
-            calibration_green_hue: 0.0,
-            calibration_green_sat: 0.0,
-            calibration_blue_hue: 0.0,
-            calibration_blue_sat: 0.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
             sharpen_detail: 25.0,
@@ -256,12 +237,99 @@ impl Default for CameraRaw {
             seed: 0,
             pixel_scale: 1.0,
             encoding_gamma: 0.0,
+            shadow_tint: 0.0,
+            calibration_hue: [0.0; 3],
+            calibration_sat: [0.0; 3],
         }
     }
 }
 
 /// Hue band centres of the Color Mixer (degrees).
 pub const HSL_BANDS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0];
+
+/// How far a primary turns at Hue ±100 (degrees), as the Color Mixer's hue sliders do.
+const CALIBRATION_TURN: f32 = 30.0;
+
+/// How much of each primary (red, green, blue) a hue is made of: triangular weights around
+/// 0°, 120° and 240° that sum to one, so a colour between two primaries follows both.
+pub fn calibration_weights(hue: f32) -> [f32; 3] {
+    let h = hue.rem_euclid(360.0);
+    let mut w = [0.0f32; 3];
+    for (i, centre) in [0.0f32, 120.0, 240.0].iter().enumerate() {
+        let d = (h - centre).abs().min(360.0 - (h - centre).abs());
+        w[i] = (1.0 - d / 120.0).max(0.0);
+    }
+    let sum: f32 = w.iter().sum();
+    if sum > 1e-6 { w.map(|v| v / sum) } else { [1.0, 0.0, 0.0] }
+}
+
+/// The Calibration panel's primaries on one linear-light pixel: its hue turns by the weighted
+/// Hue of the primaries it is made of (±100 is ±30°, positive towards the next primary) and its
+/// saturation scales by their weighted Saturation (−100 greys it); the luminance is kept, so
+/// neutrals are untouched.
+fn calibrate(c: [f32; 3], hue: [f32; 3], sat: [f32; 3]) -> [f32; 3] {
+    let [h, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
+    if s <= 1e-5 || v <= 1e-6 {
+        return c;
+    }
+    let w = calibration_weights(h);
+    let (mut dh, mut ds) = (0.0f32, 0.0f32);
+    for i in 0..3 {
+        dh += w[i] * hue[i].clamp(-100.0, 100.0);
+        ds += w[i] * sat[i].clamp(-100.0, 100.0);
+    }
+    let nh = h + dh / 100.0 * CALIBRATION_TURN;
+    let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
+    let out = hsv_to_rgb(nh, ns, v);
+    let (l0, l1) = (luma(c), luma(out));
+    if l1 > 1e-6 { out.map(|x| x * l0 / l1) } else { out }
+}
+
+/// Shadows › Tint on one linear-light pixel: `tint` −1 (green) … 1 (magenta), weighted by how
+/// dark the pixel is; the luminance is kept.
+fn shadow_tint(c: [f32; 3], tint: f32) -> [f32; 3] {
+    let l = luma(c).max(0.0);
+    // Linear 0.18 is middle grey: full strength below it, fading out towards white.
+    let weight = (1.0 - (l / 0.18).sqrt().min(1.0)).powi(2) * 0.5 + (1.0 - l.min(1.0)).powi(4) * 0.5;
+    let k = tint * 0.12 * weight * (l + 0.02);
+    let o = [c[0] + k, c[1] - k, c[2] + k].map(|v| v.max(0.0));
+    let l2 = luma(o);
+    if l2 > 1e-6 { o.map(|v| v * l / l2) } else { o }
+}
+
+/// Camera Raw's Auto for the Light panel: Exposure, Contrast, Highlights, Shadows, Whites and
+/// Blacks from the image's luminance histogram (`px` in the document's encoding). A well
+/// exposed image gets near-zero settings; a dark one more exposure and lifted shadows; one
+/// with a crushed or blown end gets Blacks or Whites back from the edge. The other panels are
+/// left alone, as Camera Raw's Auto leaves them.
+pub fn auto_tone(px: &[[f32; 4]], p: &mut CameraRaw) {
+    if px.is_empty() {
+        return;
+    }
+    let mut lum: Vec<f32> = px.iter().map(|q| luma([q[0], q[1], q[2]]).clamp(0.0, 1.0)).collect();
+    lum.sort_by(|a, b| a.total_cmp(b));
+    let at = |f: f32| lum[((lum.len() - 1) as f32 * f).round() as usize];
+    let (black, shadow, median, light, white) = (at(0.001), at(0.1), at(0.5), at(0.9), at(0.999));
+    // Exposure: the median towards middle grey (sRGB 0.46), damped so flat scenes aren't
+    // forced to it.
+    let median_lin = srgb_to_linear(median).max(1e-4);
+    p.exposure = (0.6 * (0.18f32 / median_lin).log2()).clamp(-2.0, 2.0);
+    // Blacks and Whites bring the ends to the edges without clipping more than Camera Raw does.
+    p.blacks = ((0.04 - black) * 400.0).clamp(-40.0, 40.0);
+    p.whites = ((0.96 - white) * 300.0).clamp(-40.0, 40.0);
+    // Shadows up when the darker tenth is crushed, highlights down when the brighter tenth is
+    // near white.
+    p.shadows = ((0.25 - shadow) * 200.0).clamp(0.0, 50.0);
+    p.highlights = ((light - 0.85) * -300.0).clamp(-50.0, 0.0);
+    // A little contrast for a flat histogram.
+    let spread = (light - shadow).max(0.0);
+    p.contrast = ((0.6 - spread) * 60.0).clamp(0.0, 25.0);
+    // Shown as Camera Raw shows them: Exposure to a hundredth of a stop, the others whole.
+    p.exposure = (p.exposure * 100.0).round() / 100.0;
+    for v in [&mut p.blacks, &mut p.whites, &mut p.shadows, &mut p.highlights, &mut p.contrast] {
+        *v = v.round();
+    }
+}
 
 fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
@@ -325,11 +393,13 @@ fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
 
 /// Approximate Gaussian (three box passes).
 fn gauss(v: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
-    if sigma < 0.3 {
-        return v.to_vec();
-    }
+    box_means(v, w, h, &spatial::gauss_radii(sigma))
+}
+
+/// Box means of radii `radii` in turn.
+fn box_means(v: &[f32], w: usize, h: usize, radii: &[usize]) -> Vec<f32> {
     let mut out = v.to_vec();
-    for r in crate::fxutil::gauss_box_radii(sigma) {
+    for &r in radii {
         out = box_mean(&out, w, h, r);
     }
     out
@@ -339,7 +409,7 @@ fn gauss(v: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
 /// coefficients are computed on a `s×` subsampled copy and upsampled bilinearly, which is
 /// visually equivalent for the large radii used by tone controls at a fraction of the cost.
 fn guided_fast(i: &[f32], p: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
-    let s = (r / 8).clamp(1, 8);
+    let (s, rs) = spatial::fast_guided_steps(r);
     if s == 1 {
         return guided(i, p, w, h, r, eps);
     }
@@ -357,7 +427,6 @@ fn guided_fast(i: &[f32], p: &[f32], w: usize, h: usize, r: usize, eps: f32) -> 
         o.iter().zip(&c).map(|(a, b)| a / b.max(1.0)).collect()
     };
     let (si, sp) = (down(i), down(p));
-    let rs = (r / s).max(1);
     let mi = box_mean(&si, sw, sh, rs);
     let mp = box_mean(&sp, sw, sh, rs);
     let ip: Vec<f32> = si.iter().zip(&sp).map(|(a, b)| a * b).collect();
@@ -568,28 +637,9 @@ impl CameraRaw {
     fn grade_neutral(&self) -> bool {
         self.grade_shadows.neutral() && self.grade_midtones.neutral() && self.grade_highlights.neutral() && self.grade_global.neutral()
     }
+    /// The Calibration panel at rest.
     fn calibration_neutral(&self) -> bool {
-        [
-            self.calibration_shadows_tint,
-            self.calibration_red_hue,
-            self.calibration_red_sat,
-            self.calibration_green_hue,
-            self.calibration_green_sat,
-            self.calibration_blue_hue,
-            self.calibration_blue_sat,
-        ]
-        .iter()
-        .all(|v| *v == 0.0)
-    }
-    /// The per-pixel colour stages (4–7) change nothing.
-    fn color_neutral(&self) -> bool {
-        !self.black_and_white
-            && self.vibrance == 0.0
-            && self.saturation == 0.0
-            && self.curves_neutral()
-            && self.hsl_neutral()
-            && self.grade_neutral()
-            && self.calibration_neutral()
+        self.shadow_tint == 0.0 && self.calibration_hue.iter().chain(&self.calibration_sat).all(|v| *v == 0.0)
     }
     fn curves_neutral(&self) -> bool {
         [self.curve_highlights, self.curve_lights, self.curve_darks, self.curve_shadows].iter().all(|v| *v == 0.0)
@@ -598,9 +648,14 @@ impl CameraRaw {
     /// True when every control is neutral (the filter is an identity).
     pub fn is_identity(&self) -> bool {
         self.wb_neutral()
+            && self.calibration_neutral()
             && self.tone_neutral()
             && self.dehaze == 0.0
-            && self.color_neutral()
+            && self.vibrance == 0.0
+            && self.saturation == 0.0
+            && self.curves_neutral()
+            && self.hsl_neutral()
+            && self.grade_neutral()
             && self.sharpen_amount == 0.0
             && self.noise_luminance == 0.0
             && self.noise_color == 0.0
@@ -625,140 +680,41 @@ pub fn white_balance_gains(temperature: f32, tint: f32) -> [f32; 3] {
 }
 
 /// Runs the Camera Raw pipeline on straight RGBA pixels (`w × h`, display-encoded RGB).
-/// `float` keeps values above 1 (32-bit documents). A buffer that is not `w × h` is left as is.
+/// `float` keeps values above 1 (32-bit documents).
 pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bool) {
-    if px.is_empty() || px.len() != w.saturating_mul(h) || p.is_identity() {
+    if px.is_empty() || p.is_identity() {
         return;
     }
-    tone_stage(px, w, h, p);
-    color_stage(px, w, p);
-    detail_stage(px, w, h, p);
-    effects_stage(px, w, h, p, float);
-}
-
-/// Develops one source again and again (an interactive preview), keeping what the expensive
-/// stages made: moving a colour or detail control does not redo White Balance, Dehaze,
-/// Highlights / Shadows, Contrast, Clarity, Texture or Whites / Blacks, and moving an effects
-/// control redoes only the effects. The result is exactly [`develop`]'s.
-#[derive(Default)]
-pub struct Developer {
-    source: u64,
-    /// Stages 1–3's output and the settings it was made with ([`tone_key`]).
-    tone: Option<(CameraRaw, Vec<[f32; 4]>)>,
-    /// Stages 4–8's output on `tone` ([`finish_key`]).
-    finish: Option<(CameraRaw, Vec<[f32; 4]>)>,
-}
-
-impl Developer {
-    /// `src` developed with `p`. `source` identifies the pixels: another value (or size) drops
-    /// what was kept.
-    pub fn develop(&mut self, src: &[[f32; 4]], source: u64, w: usize, h: usize, p: &CameraRaw, float: bool) -> Vec<[f32; 4]> {
-        if self.source != source || self.tone.as_ref().is_some_and(|(_, t)| t.len() != src.len()) {
-            *self = Developer { source, ..Default::default() };
-        }
-        if src.is_empty() || src.len() != w.saturating_mul(h) || p.is_identity() {
-            return src.to_vec();
-        }
-        let key = tone_key(p);
-        let tone = match self.tone.take() {
-            Some((k, px)) if k == key => px,
-            _ => {
-                self.finish = None;
-                let mut px = src.to_vec();
-                tone_stage(&mut px, w, h, p);
-                px
-            }
-        };
-        let finish_settings = finish_key(p);
-        let finish = match self.finish.take() {
-            Some((k, px)) if k == finish_settings => px,
-            _ => {
-                let mut px = tone.clone();
-                color_stage(&mut px, w, p);
-                detail_stage(&mut px, w, h, p);
-                px
-            }
-        };
-        let mut out = finish.clone();
-        effects_stage(&mut out, w, h, p, float);
-        self.tone = Some((key, tone));
-        self.finish = Some((finish_settings, finish));
-        out
-    }
-}
-
-/// The settings stages 1–3 read.
-fn tone_key(p: &CameraRaw) -> CameraRaw {
-    CameraRaw {
-        temperature: p.temperature,
-        tint: p.tint,
-        exposure: p.exposure,
-        contrast: p.contrast,
-        highlights: p.highlights,
-        shadows: p.shadows,
-        whites: p.whites,
-        blacks: p.blacks,
-        texture: p.texture,
-        clarity: p.clarity,
-        dehaze: p.dehaze,
-        pixel_scale: p.pixel_scale,
-        encoding_gamma: p.encoding_gamma,
-        ..CameraRaw::default()
-    }
-}
-
-/// The settings stages 4–8 read: all but the tone and effects controls (a new control is part of
-/// this key until it is placed elsewhere, so it can never leave a stale result).
-fn finish_key(p: &CameraRaw) -> CameraRaw {
-    let d = CameraRaw::default();
-    CameraRaw {
-        temperature: d.temperature,
-        tint: d.tint,
-        exposure: d.exposure,
-        contrast: d.contrast,
-        highlights: d.highlights,
-        shadows: d.shadows,
-        whites: d.whites,
-        blacks: d.blacks,
-        texture: d.texture,
-        clarity: d.clarity,
-        dehaze: d.dehaze,
-        grain_amount: d.grain_amount,
-        grain_size: d.grain_size,
-        grain_roughness: d.grain_roughness,
-        vignette_amount: d.vignette_amount,
-        vignette_midpoint: d.vignette_midpoint,
-        vignette_roundness: d.vignette_roundness,
-        vignette_feather: d.vignette_feather,
-        vignette_highlights: d.vignette_highlights,
-        vignette_style: d.vignette_style,
-        seed: d.seed,
-        ..p.clone()
-    }
-}
-
-/// Stages 1–3: White Balance and Exposure, Dehaze, Highlights / Shadows, Contrast, Clarity and
-/// Texture, Whites / Blacks.
-fn tone_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
     let ps = p.pixel_scale.clamp(0.01, 1.0);
-    let long = w.max(h) as f32;
     // 1. White balance + exposure in linear light.
-    if !p.wb_neutral() {
-        let mut g = white_balance_gains(p.temperature, p.tint);
-        let norm = luma(g);
-        g = g.map(|v| v / norm * 2f32.powf(p.exposure));
-        let srgb = Lut::srgb();
+    if let Some(g) = per_pixel::gains(p) {
         par_rows(px, w, 1, |_, row| {
             for q in row.iter_mut() {
-                for c in 0..3 {
-                    q[c] = srgb.encode((srgb.decode(q[c]) * g[c]).max(0.0));
+                *q = balance(*q, g);
+            }
+        });
+    }
+    // 1b. Calibration: the primaries turned and purer or greyer, and the shadows tinted, in
+    // linear light (the camera's primaries are what Camera Raw's panel calibrates).
+    if !p.calibration_neutral() {
+        let primaries = p.calibration_hue.iter().chain(&p.calibration_sat).any(|v| *v != 0.0);
+        let tint = p.shadow_tint.clamp(-100.0, 100.0) / 100.0;
+        par_rows(px, w, 1, |_, row| {
+            for q in row.iter_mut() {
+                let c = [srgb_to_linear(q[0]), srgb_to_linear(q[1]), srgb_to_linear(q[2])];
+                let mut o = if primaries { calibrate(c, p.calibration_hue, p.calibration_sat) } else { c };
+                if tint != 0.0 {
+                    o = shadow_tint(o, tint);
+                }
+                for k in 0..3 {
+                    q[k] = linear_to_srgb(o[k].max(0.0));
                 }
             }
         });
     }
     // 2. Dehaze.
-    if p.dehaze != 0.0 {
-        dehaze(px, w, h, p.dehaze / 100.0);
+    if let Some(d) = Dehaze::new(p, w, h) {
+        dehaze(px, w, h, &d);
     }
     // 3. Tone. Highlights and Shadows: a local Laplacian filter (see `local_tone`).
     if p.highlights != 0.0 || p.shadows != 0.0 {
@@ -767,206 +723,121 @@ fn tone_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
     if !p.local_tone_neutral() && [p.contrast, p.texture, p.clarity].iter().any(|v| *v != 0.0) {
         let l: Vec<f32> = px.iter().map(|q| luma([q[0], q[1], q[2]]).max(0.0)).collect();
         let lc: Vec<f32> = l.iter().map(|v| v.min(1.0)).collect();
-        let clar = (p.clarity != 0.0).then(|| guided_fast(&lc, &lc, w, h, ((long * 0.02) as usize).max(3), 0.005));
-        let tex = (p.texture != 0.0).then(|| gauss(&lc, w, h, (long * 0.002).max(1.5 * ps)));
+        let clarity = Clarity::new(p, w, h);
+        let texture = Texture::new(p, w, h);
+        let clar = clarity.as_ref().map(|c| guided_fast(&lc, &lc, w, h, c.radius, spatial::CLARITY_EPS));
+        let tex = texture.as_ref().map(|t| box_means(&lc, w, h, &t.radii));
         let k_con = p.contrast / 100.0 * 0.6;
-        let tau = std::f32::consts::TAU;
         par_rows(px, w, 1, |y, row| {
             for (x, q) in row.iter_mut().enumerate() {
                 let i = y * w + x;
                 let l0 = l[i];
                 let mut lv = lc[i];
-                if let Some(c) = &clar {
+                if let (Some(c), Some(k)) = (&clar, &clarity) {
                     let mw = 1.0 - (2.0 * lv.clamp(0.0, 1.0) - 1.0).powi(2);
-                    lv += p.clarity / 100.0 * 0.8 * (lc[i] - c[i]) * mw;
+                    lv += k.amount * (lc[i] - c[i]) * mw;
                 }
-                if let Some(t) = &tex {
-                    lv += p.texture / 100.0 * 0.9 * (lc[i] - t[i]).clamp(-0.1, 0.1);
+                if let (Some(t), Some(k)) = (&tex, &texture) {
+                    lv += k.amount * (lc[i] - t[i]).clamp(-spatial::TEXTURE_LIMIT, spatial::TEXTURE_LIMIT);
                 }
-                if k_con != 0.0 {
-                    let xx = lv.clamp(0.0, 1.0);
-                    lv += -k_con * (tau * xx).sin() / tau;
-                }
-                let lv = lv.max(0.0) + (l0 - lc[i]);
-                let ratio = if l0 > 1e-5 { lv / l0 } else { 1.0 };
-                for c in 0..3 {
-                    q[c] = if l0 > 1e-5 { q[c] * ratio } else { q[c] + (lv - l0) };
-                }
+                *q = tone(*q, l0, lc[i], lv, k_con);
             }
         });
     }
     // 3b. Whites and Blacks: global curves adapted to the image's black and white points.
     if p.whites != 0.0 || p.blacks != 0.0 {
-        let lut = Lut::of(Encoding::of(p.encoding_gamma));
-        let (bp, wp) = luminance_points(px, w, h, &lut);
+        let enc = Encoding::of(p.encoding_gamma);
+        let (bp, wp) = luminance_points(px, w, h, enc, |q| q);
         let (xw, xb) = whites_blacks::amounts(p.whites.clamp(-100.0, 100.0), p.blacks.clamp(-100.0, 100.0), bp, wp);
-        whites_blacks::apply(px, w, xw, xb, &lut);
+        whites_blacks::apply(px, w, xw, xb, enc);
     }
-}
-
-/// Calibration's primaries as a matrix on linear RGB: each primary turned about the grey axis
-/// (Hue, up to ±40°) and its chroma scaled (Saturation), the rows then normalized so neutral
-/// colours stay neutral.
-fn calibration_matrix(p: &CameraRaw) -> [[f32; 3]; 3] {
-    let hue = [p.calibration_red_hue, p.calibration_green_hue, p.calibration_blue_hue];
-    let sat = [p.calibration_red_sat, p.calibration_green_sat, p.calibration_blue_sat];
-    let a = 1.0 / 3f32.sqrt();
-    let mut m = [[0.0f32; 3]; 3];
-    for k in 0..3 {
-        let theta = (hue[k].clamp(-100.0, 100.0) / 100.0 * 40.0).to_radians();
-        let s = 1.0 + sat[k].clamp(-100.0, 100.0) / 100.0 * 0.8;
-        let mut e = [0.0f32; 3];
-        e[k] = 1.0;
-        // Rodrigues' rotation about the unit grey axis (a, a, a); a primary's projection on it
-        // is a third of white.
-        let cross = [a * (e[2] - e[1]), a * (e[0] - e[2]), a * (e[1] - e[0])];
-        let (cs, sn) = (theta.cos(), theta.sin());
-        for i in 0..3 {
-            let turned = e[i] * cs + cross[i] * sn + (1.0 - cs) / 3.0;
-            m[i][k] = 1.0 / 3.0 + (turned - 1.0 / 3.0) * s;
-        }
-    }
-    for row in m.iter_mut() {
-        let sum: f32 = row.iter().sum();
-        if sum.abs() > 1e-3 {
-            row.iter_mut().for_each(|v| *v /= sum);
-        }
-    }
-    m
-}
-
-/// Stages 4–7, per pixel: Calibration, Vibrance / Saturation, the tone curves, the Color Mixer
-/// (or the B&W Mix) and Color Grading.
-fn color_stage(px: &mut [[f32; 4]], w: usize, p: &CameraRaw) {
-    if p.color_neutral() {
-        return;
-    }
-    let calibration = (!p.calibration_neutral()).then(|| (calibration_matrix(p), Lut::of(Encoding::of(p.encoding_gamma))));
-    let shadows_tint = p.calibration_shadows_tint.clamp(-100.0, 100.0) / 100.0;
-    let bw = p.black_and_white;
-    let bw_mix = p.bw_mix.map(|v| v.clamp(-100.0, 100.0));
-    let presence = !bw && (p.vibrance != 0.0 || p.saturation != 0.0);
-    let par = (!(p.curve_highlights == 0.0 && p.curve_lights == 0.0 && p.curve_darks == 0.0 && p.curve_shadows == 0.0)).then(|| parametric_lut(p, 1024));
-    let pts = |c: &Vec<[f32; 2]>| (!is_linear(c)).then(|| curve_lut(c, 1024));
-    let (master, cr, cg, cb) = (pts(&p.point_curve), pts(&p.point_curve_red), pts(&p.point_curve_green), pts(&p.point_curve_blue));
-    let hsl = !bw && !p.hsl_neutral();
-    let grade = !p.grade_neutral();
-    let wheel_tint = |wh: &Wheel| -> [f32; 3] {
-        let c = hsv_to_rgb(wh.hue, 1.0, 1.0);
-        let l = luma(c);
-        [c[0] - l, c[1] - l, c[2] - l].map(|v| v * wh.sat / 100.0 * 0.3)
-    };
-    let tints = [wheel_tint(&p.grade_shadows), wheel_tint(&p.grade_midtones), wheel_tint(&p.grade_highlights), wheel_tint(&p.grade_global)];
-    let blend = 0.15 + p.grade_blending.clamp(0.0, 100.0) / 100.0 * 0.35;
-    let bal = p.grade_balance.clamp(-100.0, 100.0) / 100.0 * 0.25;
-    par_rows(px, w, 1, |_, row| {
-        for q in row.iter_mut() {
-            let mut c = [q[0], q[1], q[2]];
-            if let Some((m, lut)) = &calibration {
-                let l = c.map(|v| lut.decode(v));
-                let mut o = [0, 1, 2].map(|i| m[i][0] * l[0] + m[i][1] * l[1] + m[i][2] * l[2]);
-                if shadows_tint != 0.0 {
-                    // Positive values turn the shadows magenta (less green), negative green.
-                    let wgt = 1.0 - smoothstep(0.0, 0.18, luma(o).clamp(0.0, 1.0));
-                    o[1] *= 2f32.powf(-shadows_tint * 0.35 * wgt);
+    // 4–7: per-pixel colour stages.
+    let need_color = p.vibrance != 0.0 || p.saturation != 0.0 || !p.curves_neutral() || !p.hsl_neutral() || !p.grade_neutral();
+    if need_color {
+        let par = (!(p.curve_highlights == 0.0 && p.curve_lights == 0.0 && p.curve_darks == 0.0 && p.curve_shadows == 0.0)).then(|| parametric_lut(p, 1024));
+        let pts = |c: &Vec<[f32; 2]>| (!is_linear(c)).then(|| curve_lut(c, 1024));
+        let (master, cr, cg, cb) = (pts(&p.point_curve), pts(&p.point_curve_red), pts(&p.point_curve_green), pts(&p.point_curve_blue));
+        let hsl = !p.hsl_neutral();
+        let grade = !p.grade_neutral();
+        let Grade { tints, lums, blend, balance: bal } = Grade::new(p);
+        par_rows(px, w, 1, |_, row| {
+            for q in row.iter_mut() {
+                let mut c = [q[0], q[1], q[2]];
+                if p.vibrance != 0.0 || p.saturation != 0.0 {
+                    let l = luma(c);
+                    let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+                    let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
+                    // Vibrance protects skin-ish hues (oranges) a little, like ACR.
+                    let hue = rgb_to_hsv(c)[0];
+                    let skin = (1.0 - ((hue - 25.0).abs() / 25.0)).clamp(0.0, 1.0) * 0.5;
+                    let k = 1.0 + p.saturation / 100.0 + p.vibrance / 100.0 * (1.0 - sat) * (1.0 - skin);
+                    c = c.map(|v| l + (v - l) * k.max(0.0));
                 }
-                c = o.map(|v| lut.encode(v));
-            }
-            if presence {
-                let l = luma(c);
-                let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
-                let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
-                // Vibrance protects skin-ish hues (oranges) a little, like ACR.
-                let hue = rgb_to_hsv(c)[0];
-                let skin = (1.0 - ((hue - 25.0).abs() / 25.0)).clamp(0.0, 1.0) * 0.5;
-                let k = 1.0 + p.saturation / 100.0 + p.vibrance / 100.0 * (1.0 - sat) * (1.0 - skin);
-                c = c.map(|v| l + (v - l) * k.max(0.0));
-            }
-            if let Some(lut) = &par {
-                c = c.map(|v| lut_eval(lut, v));
-            }
-            if let Some(lut) = &master {
-                c = c.map(|v| lut_eval(lut, v));
-            }
-            for (ch, lut) in [&cr, &cg, &cb].iter().enumerate() {
-                if let Some(lut) = lut {
-                    c[ch] = lut_eval(lut, c[ch]);
+                if let Some(lut) = &par {
+                    c = c.map(|v| lut_eval(lut, v));
                 }
-            }
-            if hsl {
-                let [hh, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
-                if s > 1e-4 {
-                    let wts = band_weights(hh);
-                    let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
-                    for k in 0..8 {
-                        dh += wts[k] * p.hsl_hue[k];
-                        ds += wts[k] * p.hsl_sat[k];
-                        dl += wts[k] * p.hsl_lum[k];
-                    }
-                    let nh = hh + dh / 100.0 * 30.0;
-                    let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
-                    let mut out = hsv_to_rgb(nh, ns, v);
-                    // Keep the luminance, then apply the luminance shift weighted by saturation.
-                    let (l0, l1) = (luma(c), luma(out));
-                    if l1 > 1e-6 {
-                        out = out.map(|x| x * l0 / l1);
-                    }
-                    let k = 2f32.powf(dl / 100.0 * 1.0 * s);
-                    c = out.map(|x| x * k);
+                if let Some(lut) = &master {
+                    c = c.map(|v| lut_eval(lut, v));
                 }
-            }
-            if bw {
-                // Grey from the luminance, each hue band lightened or darkened by its B&W Mix in
-                // proportion to the colour's saturation.
-                let [hh, s, _] = rgb_to_hsv(c.map(|x| x.max(0.0)));
-                let wts = band_weights(hh);
-                let dl: f32 = (0..8).map(|k| wts[k] * bw_mix[k]).sum();
-                let g = luma(c) * 2f32.powf(dl / 100.0 * 1.5 * s);
-                c = [g; 3];
-            }
-            if grade {
-                let l = luma(c).clamp(0.0, 1.0);
-                let sh = 1.0 - smoothstep(0.0, 0.5 + bal + blend, l);
-                let hi = smoothstep(0.5 + bal - blend, 1.0, l);
-                let mid = (1.0 - sh - hi).max(0.0);
-                let masks = [sh, mid, hi, 1.0];
-                let lums = [p.grade_shadows.lum, p.grade_midtones.lum, p.grade_highlights.lum, p.grade_global.lum];
-                for k in 0..4 {
-                    for ch in 0..3 {
-                        c[ch] += masks[k] * tints[k][ch];
-                    }
-                    if lums[k] != 0.0 {
-                        let f = 2f32.powf(masks[k] * lums[k] / 100.0 * 0.6);
-                        c = c.map(|x| x * f);
+                for (ch, lut) in [&cr, &cg, &cb].iter().enumerate() {
+                    if let Some(lut) = lut {
+                        c[ch] = lut_eval(lut, c[ch]);
                     }
                 }
+                if hsl {
+                    let [hh, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
+                    if s > 1e-4 {
+                        let wts = band_weights(hh);
+                        let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
+                        for k in 0..8 {
+                            dh += wts[k] * p.hsl_hue[k];
+                            ds += wts[k] * p.hsl_sat[k];
+                            dl += wts[k] * p.hsl_lum[k];
+                        }
+                        let nh = hh + dh / 100.0 * 30.0;
+                        let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
+                        let mut out = hsv_to_rgb(nh, ns, v);
+                        // Keep the luminance, then apply the luminance shift weighted by saturation.
+                        let (l0, l1) = (luma(c), luma(out));
+                        if l1 > 1e-6 {
+                            out = out.map(|x| x * l0 / l1);
+                        }
+                        let k = 2f32.powf(dl / 100.0 * 1.0 * s);
+                        c = out.map(|x| x * k);
+                    }
+                }
+                if grade {
+                    let l = luma(c).clamp(0.0, 1.0);
+                    let sh = 1.0 - smoothstep(0.0, 0.5 + bal + blend, l);
+                    let hi = smoothstep(0.5 + bal - blend, 1.0, l);
+                    let mid = (1.0 - sh - hi).max(0.0);
+                    let masks = [sh, mid, hi, 1.0];
+                    for k in 0..4 {
+                        for ch in 0..3 {
+                            c[ch] += masks[k] * tints[k][ch];
+                        }
+                        if lums[k] != 0.0 {
+                            let f = 2f32.powf(masks[k] * lums[k] / 100.0 * 0.6);
+                            c = c.map(|x| x * f);
+                        }
+                    }
+                }
+                q[0] = c[0];
+                q[1] = c[1];
+                q[2] = c[2];
             }
-            q[0] = c[0];
-            q[1] = c[1];
-            q[2] = c[2];
-        }
-    });
-}
-
-/// Stage 8: sharpening and noise reduction.
-fn detail_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
+        });
+    }
+    // 8. Detail.
     if p.noise_luminance > 0.0 || p.noise_color > 0.0 || p.sharpen_amount > 0.0 {
-        detail(px, w, h, p, p.pixel_scale.clamp(0.01, 1.0));
+        detail(px, w, h, p, ps);
     }
-}
-
-/// Stage 9: post-crop vignette and grain, then the clamp of integer documents.
-fn effects_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bool) {
-    let ps = p.pixel_scale.clamp(0.01, 1.0);
+    // 9. Effects.
     if p.vignette_amount != 0.0 {
         vignette(px, w, h, p);
     }
     if p.grain_amount > 0.0 {
-        let cell = 1.0 + p.grain_size / 25.0;
-        let rough = p.grain_roughness / 100.0;
-        let amt = p.grain_amount / 100.0 * 0.12;
-        let seed = p.seed as u64;
-        let pscale = 1.0 / ps;
+        let Grain { cell, roughness: rough, amount: amt, seed, scale: pscale } = Grain::new(p);
         par_rows(px, w, 1, |y, row| {
             for (x, q) in row.iter_mut().enumerate() {
                 // Sample in full-resolution coordinates so previews match the result.
@@ -989,36 +860,75 @@ fn effects_stage(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: 
     }
 }
 
+/// The end of stage 3 on one pixel: Contrast (strength `k_con`) on the luminance `lv` that
+/// Clarity and Texture left, then the pixel rescaled to it. `l0` is its luminance, `lc` that
+/// clipped to 1.
+fn tone(mut q: [f32; 4], l0: f32, lc: f32, mut lv: f32, k_con: f32) -> [f32; 4] {
+    if k_con != 0.0 {
+        let tau = std::f32::consts::TAU;
+        let xx = lv.clamp(0.0, 1.0);
+        lv += -k_con * (tau * xx).sin() / tau;
+    }
+    let lv = lv.max(0.0) + (l0 - lc);
+    let ratio = if l0 > 1e-5 { lv / l0 } else { 1.0 };
+    for c in 0..3 {
+        q[c] = if l0 > 1e-5 { q[c] * ratio } else { q[c] + (lv - l0) };
+    }
+    q
+}
+
+/// Stage 3 on one pixel when Contrast is its only control.
+fn contrast(q: [f32; 4], k_con: f32) -> [f32; 4] {
+    let l0 = luma([q[0], q[1], q[2]]).max(0.0);
+    let lc = l0.min(1.0);
+    tone(q, l0, lc, lc, k_con)
+}
+
+/// Stage 1 on one pixel: white balance and exposure `gains` in linear light.
+fn balance(mut q: [f32; 4], g: [f32; 3]) -> [f32; 4] {
+    for c in 0..3 {
+        q[c] = linear_to_srgb((srgb_to_linear(q[c]) * g[c]).max(0.0));
+    }
+    q
+}
+
+/// The index of the `q` quantile (0 … 1) among `len` sorted values, as every percentile in the
+/// develop picks it.
+pub fn quantile_rank(len: usize, q: f32) -> usize {
+    (len.saturating_sub(1) as f32 * q).round() as usize
+}
+
 /// The image's black and white points as sRGB-encoded grey levels: the 3rd percentile of the
 /// luminance and the 99.5th of the brightest channel, on a copy at most 256 pixels across (so a
-/// preview proxy and the full image agree).
-fn luminance_points(px: &[[f32; 4]], w: usize, h: usize, lut: &Lut) -> (f32, f32) {
-    let f = w.max(h).div_ceil(256).max(1);
+/// preview proxy and the full image agree). `map` is applied to each pixel first.
+fn luminance_points(px: &[[f32; 4]], w: usize, h: usize, enc: Encoding, map: impl Fn([f32; 4]) -> [f32; 4] + Sync) -> (f32, f32) {
+    let f = w.max(h).div_ceil(whites_blacks::POINTS_SIDE).max(1);
     let (sw, sh) = (w.div_ceil(f), h.div_ceil(f));
-    // Rows of cells in parallel, each summed in the same order as one pass would.
-    let rows = crate::photo_util::par_map(sh, |cy| {
+    // Each band of `f` rows sums into its own row of cells, in the same order as one pass would.
+    let bands = crate::photo_util::par_map(sh, |sy| {
         let mut sum = vec![[0.0f64; 4]; sw];
-        for y in cy * f..((cy + 1) * f).min(h) {
-            for (x, q) in px.get(y * w..(y + 1) * w).unwrap_or_default().iter().enumerate() {
-                let Some(s) = sum.get_mut(x / f) else { continue };
+        for y in sy * f..((sy + 1) * f).min(h) {
+            for x in 0..w {
+                let q = map(px[y * w + x]);
+                let s = &mut sum[x / f];
                 for c in 0..3 {
-                    s[c] += f64::from(lut.decode(q[c]).clamp(0.0, 1.0));
+                    s[c] += f64::from(enc.decode(q[c]).clamp(0.0, 1.0));
                 }
                 s[3] += 1.0;
             }
         }
         sum
     });
-    let cells: Vec<[f32; 3]> = rows.iter().flatten().filter(|s| s[3] > 0.0).map(|s| [0, 1, 2].map(|c| (s[c] / s[3]) as f32)).collect();
+    let cells: Vec<[f32; 3]> = bands.iter().flatten().filter(|s| s[3] > 0.0).map(|s| [0, 1, 2].map(|c| (s[c] / s[3]) as f32)).collect();
     if cells.is_empty() {
         return (0.0, 1.0);
     }
     let pct = |mut v: Vec<f32>, q: f32| {
         v.sort_by(f32::total_cmp);
-        v[((v.len() - 1) as f32 * q).round() as usize]
+        v[quantile_rank(v.len(), q)]
     };
-    let bp = pct(cells.iter().map(|c| luma(*c)).collect(), 0.03);
-    let wp = pct(cells.iter().map(|c| c[0].max(c[1]).max(c[2])).collect(), 0.995);
+    let bp = pct(cells.iter().map(|c| luma(*c)).collect(), whites_blacks::POINT_QUANTILES[0]);
+    let wp = pct(cells.iter().map(|c| c[0].max(c[1]).max(c[2])).collect(), whites_blacks::POINT_QUANTILES[1]);
     (linear_to_srgb(bp), linear_to_srgb(wp))
 }
 
@@ -1032,62 +942,83 @@ fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
     top + (bot - top) * sy
 }
 
-fn dehaze(px: &mut [[f32; 4]], w: usize, h: usize, amount: f32) {
-    // Transmission on a ≤ 768 px proxy, upsampled.
-    let k = w.max(h).div_ceil(768).max(1);
-    let (sw, sh) = (w.div_ceil(k), h.div_ceil(k));
-    let mut small = vec![[0.0f32; 3]; sw * sh];
-    let mut cnt = vec![0f32; sw * sh];
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y / k) * sw + x / k;
-            for c in 0..3 {
-                small[i][c] += px[y * w + x][c].clamp(0.0, 1.0);
+/// Dehaze's copy of `px` (`w × h`): each pixel mapped by `map`, clipped to 0 … 1 and averaged over
+/// `d.factor × d.factor` blocks, each block summed in raster order.
+fn haze_cells(px: &[[f32; 4]], w: usize, h: usize, d: &Dehaze, map: impl Fn([f32; 4]) -> [f32; 4] + Sync) -> Vec<[f32; 3]> {
+    let (k, [sw, sh]) = (d.factor, d.size);
+    let bands = crate::photo_util::par_map(sh, |sy| {
+        let mut small = vec![[0.0f32; 3]; sw];
+        let mut cnt = vec![0f32; sw];
+        for y in sy * k..((sy + 1) * k).min(h) {
+            for x in 0..w {
+                let q = map(px[y * w + x]);
+                let i = x / k;
+                for c in 0..3 {
+                    small[i][c] += q[c].clamp(0.0, 1.0);
+                }
+                cnt[i] += 1.0;
             }
-            cnt[i] += 1.0;
         }
-    }
-    for (s, c) in small.iter_mut().zip(&cnt) {
-        *s = s.map(|v| v / c.max(1.0));
-    }
-    let r = (sw.max(sh) / 60).max(2);
-    let min_filter = |v: &[f32]| -> Vec<f32> {
+        small.iter().zip(&cnt).map(|(s, c)| s.map(|v| v / c.max(1.0))).collect::<Vec<_>>()
+    });
+    bands.into_iter().flatten().collect()
+}
+
+fn dehaze(px: &mut [[f32; 4]], w: usize, h: usize, d: &Dehaze) {
+    // Transmission on a ≤ DEHAZE_SIDE px proxy, upsampled.
+    let (k, [sw, sh], r, amount) = (d.factor, d.size, d.radius, d.amount);
+    let small = haze_cells(px, w, h, d, |q| q);
+    // The minimum (or, with `f32::max`, maximum) over each (2r + 1)² window.
+    let rank_filter = |v: &[f32], start: f32, pick: fn(f32, f32) -> f32| -> Vec<f32> {
         let mut a = vec![0.0f32; sw * sh];
         for y in 0..sh {
             for x in 0..sw {
                 let (x0, x1) = (x.saturating_sub(r), (x + r).min(sw - 1));
-                a[y * sw + x] = (x0..=x1).map(|xx| v[y * sw + xx]).fold(f32::MAX, f32::min);
+                a[y * sw + x] = (x0..=x1).map(|xx| v[y * sw + xx]).fold(start, pick);
             }
         }
         let mut b = vec![0.0f32; sw * sh];
         for y in 0..sh {
             for x in 0..sw {
                 let (y0, y1) = (y.saturating_sub(r), (y + r).min(sh - 1));
-                b[y * sw + x] = (y0..=y1).map(|yy| a[yy * sw + x]).fold(f32::MAX, f32::min);
+                b[y * sw + x] = (y0..=y1).map(|yy| a[yy * sw + x]).fold(start, pick);
             }
         }
         b
     };
+    let min_filter = |v: &[f32]| rank_filter(v, f32::MAX, f32::min);
     let dark = min_filter(&small.iter().map(|c| c[0].min(c[1]).min(c[2])).collect::<Vec<_>>());
-    // Atmospheric light: mean colour of the brightest 0.1 % of the dark channel.
+    // Atmospheric light: mean colour of the brightest 0.1 % of the dark channel (ties in the
+    // order of the cells).
     let mut idx: Vec<usize> = (0..sw * sh).collect();
     idx.sort_by(|&a, &b| dark[b].total_cmp(&dark[a]));
-    let top = (sw * sh / 1000).max(1);
+    let top = d.top;
     let mut air = [0.0f32; 3];
     for &i in &idx[..top] {
         for c in 0..3 {
             air[c] += small[i][c] / top as f32;
         }
     }
-    let air = air.map(|v| v.max(0.2));
+    let air = air.map(|v| v.max(spatial::DEHAZE_AIR_FLOOR));
     let norm_dark = min_filter(&small.iter().map(|c| (c[0] / air[0]).min(c[1] / air[1]).min(c[2] / air[2])).collect::<Vec<_>>());
-    let t_raw: Vec<f32> = norm_dark.iter().map(|d| 1.0 - 0.95 * d).collect();
+    // Opened (a maximum filter of the same radius after the minimum): the minimum grows every
+    // dark object by `r`, so sky beside a dark building took its dark channel, counted as
+    // haze-free and kept a bright halo (#9273). Opening shrinks dark regions back to their
+    // outline and is still a lower bound of the dark channel over the window. It raises the dark
+    // channel on average, so the ω weight is scaled to keep the slider's overall strength.
+    let opened = rank_filter(&norm_dark, f32::MIN, f32::max);
+    // Summed in f64: an f32 running sum over the copy's few hundred thousand cells drifts by about
+    // 1e-5, which the low transmission beside haze multiplies up to a visible fraction of a level.
+    let mean = |v: &[f32]| (v.iter().map(|x| f64::from(*x)).sum::<f64>() / v.len().max(1) as f64) as f32;
+    let weight = spatial::DEHAZE_OMEGA * mean(&norm_dark) / mean(&opened).max(1e-6);
+    let t_raw: Vec<f32> = opened.iter().map(|d| 1.0 - weight * d).collect();
     let guide: Vec<f32> = small.iter().map(|c| luma(*c)).collect();
-    let t = guided(&guide, &t_raw, sw, sh, r * 2, 1e-3);
+    let t = guided(&guide, &t_raw, sw, sh, d.guide_radius, spatial::DEHAZE_EPS);
     let ks = k as f32;
     par_rows(px, w, 1, |y, row| {
         for (x, q) in row.iter_mut().enumerate() {
-            let tv = crate::photo_util::bilinear(&t, sw, sh, 1, 0, (x as f32 + 0.5) / ks - 0.5, (y as f32 + 0.5) / ks - 0.5).clamp(0.1, 1.0);
+            let tv =
+                crate::photo_util::bilinear(&t, sw, sh, 1, 0, (x as f32 + 0.5) / ks - 0.5, (y as f32 + 0.5) / ks - 0.5).clamp(spatial::DEHAZE_T_FLOOR, 1.0);
             for c in 0..3 {
                 let i = q[c];
                 let j = (i - air[c]) / tv + air[c];
@@ -1098,23 +1029,25 @@ fn dehaze(px: &mut [[f32; 4]], w: usize, h: usize, amount: f32) {
 }
 
 fn detail(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, ps: f32) {
+    // The controls' documented 0..=100 range: raw values drive the filter radii below.
+    let [nl, nld, nc, ncd] = [p.noise_luminance, p.noise_luminance_detail, p.noise_color, p.noise_color_detail].map(|v| v.clamp(0.0, 100.0));
     // Work in Y + chroma (BT.709 luma, B−Y, R−Y).
     let mut y: Vec<f32> = px.iter().map(|q| luma([q[0], q[1], q[2]])).collect();
     let mut cb: Vec<f32> = px.iter().zip(&y).map(|(q, l)| q[2] - l).collect();
     let mut cr: Vec<f32> = px.iter().zip(&y).map(|(q, l)| q[0] - l).collect();
-    if p.noise_luminance > 0.0 {
-        let n = p.noise_luminance / 100.0;
+    if nl > 0.0 {
+        let n = nl / 100.0;
         let r = ((1.0 + 3.0 * n) * ps).round().max(1.0) as usize;
         let smooth = guided(&y, &y, w, h, r, (n * 0.06).powi(2) + 1e-6);
-        let keep = p.noise_luminance_detail / 100.0 * 0.5;
+        let keep = nld / 100.0 * 0.5;
         for i in 0..w * h {
             y[i] = smooth[i] + (y[i] - smooth[i]) * keep;
         }
     }
-    if p.noise_color > 0.0 {
-        let sigma = (p.noise_color / 100.0 * 6.0 * ps).max(0.3);
+    if nc > 0.0 {
+        let sigma = (nc / 100.0 * 6.0 * ps).max(0.3);
         let (bcb, bcr) = (gauss(&cb, w, h, sigma), gauss(&cr, w, h, sigma));
-        let keep = p.noise_color_detail / 100.0 * 0.3;
+        let keep = ncd / 100.0 * 0.3;
         for i in 0..w * h {
             cb[i] = bcb[i] + (cb[i] - bcb[i]) * keep;
             cr[i] = bcr[i] + (cr[i] - bcr[i]) * keep;
@@ -1156,24 +1089,7 @@ fn detail(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, ps: f32) {
 }
 
 fn vignette(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
-    let amt = p.vignette_amount / 100.0;
-    let mid = p.vignette_midpoint.clamp(0.0, 100.0) / 100.0;
-    let feather = p.vignette_feather.clamp(0.0, 100.0) / 100.0;
-    let round = p.vignette_roundness.clamp(-100.0, 100.0) / 100.0;
-    let hl = p.vignette_highlights.clamp(0.0, 100.0) / 100.0;
-    let style = p.vignette_style.as_str();
-    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    // Roundness: 0 follows the frame's aspect, +1 a circle, −1 a rounded rectangle.
-    let (ax, ay) = if round >= 0.0 {
-        let r = cx.min(cy) + (cx.max(cy) - cx.min(cy)) * (1.0 - round);
-        (if cx >= cy { r } else { cx }, if cy > cx { r } else { cy })
-    } else {
-        (cx, cy)
-    };
-    let pw = 2.0 + (-round).max(0.0) * 6.0;
-    let inner = 1.0 - mid * 0.8;
-    let edge0 = inner - feather * 0.5 * inner;
-    let edge1 = inner + feather * 0.5 * (1.4 - inner) + 0.02;
+    let Vignette { amount: amt, highlights: hl, style, centre: [cx, cy], axes: [ax, ay], power: pw, edges: [edge0, edge1] } = Vignette::new(w, h, p);
     par_rows(px, w, 1, |y, row| {
         for (x, q) in row.iter_mut().enumerate() {
             let (dx, dy) = (((x as f32 + 0.5 - cx) / ax).abs(), ((y as f32 + 0.5 - cy) / ay).abs());
@@ -1184,7 +1100,7 @@ fn vignette(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
             }
             let l = luma([q[0], q[1], q[2]]).clamp(0.0, 1.0);
             match style {
-                "paintOverlay" => {
+                VignetteStyle::PaintOverlay => {
                     let target = if amt < 0.0 { 0.0 } else { 1.0 };
                     let k = m * amt.abs();
                     for c in 0..3 {
@@ -1198,7 +1114,7 @@ fn vignette(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
                         let protect = smoothstep(0.6, 1.0, l) * hl;
                         k += (1.0 - k) * protect;
                     }
-                    if style == "colorPriority" {
+                    if style == VignetteStyle::ColorPriority {
                         let nl = l * k;
                         for c in 0..3 {
                             q[c] += nl - l;
@@ -1217,6 +1133,38 @@ fn vignette(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #9273: Dehaze clears the haze evenly over a sky, right up to a dark building, instead of
+    /// leaving a bright halo of uncorrected haze around it. Synthetic scene: a clear sky and a
+    /// dark tower, hazed with `I = J·t + A·(1 − t)`.
+    #[test]
+    fn dehaze_leaves_no_halo_beside_dark_objects() {
+        let (w, h) = (600usize, 400usize);
+        let tower = |x: usize, y: usize| (250..350).contains(&x) && y >= 120;
+        let (t, air) = (0.55f32, [0.9f32, 0.9, 0.9]);
+        let mut px: Vec<[f32; 4]> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let j = if tower(x, y) { [0.06, 0.06, 0.07] } else { [0.35 + 0.1 * y as f32 / h as f32, 0.5, 0.8] };
+                let c: [f32; 3] = std::array::from_fn(|k| j[k] * t + air[k] * (1.0 - t));
+                [c[0], c[1], c[2], 1.0]
+            })
+            .collect();
+        let d = Dehaze::new(&CameraRaw { dehaze: 100.0, ..Default::default() }, w, h).unwrap();
+        dehaze(&mut px, w, h, &d);
+        let sky = |xs: std::ops::Range<usize>| {
+            let v: Vec<f32> =
+                (150..390).flat_map(|y| xs.clone().map(move |x| (x, y))).map(|(x, y)| luma([px[y * w + x][0], px[y * w + x][1], px[y * w + x][2]])).collect();
+            v.iter().sum::<f32>() / v.len() as f32
+        };
+        // Sky 1–8 px from the tower against open sky: the haze left beside it, in 8-bit levels.
+        let halo = (sky(242..250) - sky(20..80)) * 255.0;
+        // 6.4 levels before the dark channel was opened, under 1 after.
+        assert!(halo < 3.0, "a {halo:.1}-level halo beside the tower");
+        // The open sky is still cleared: darker than the hazy input.
+        let hazy = luma(std::array::from_fn(|k| [0.4, 0.5, 0.8][k] * t + air[k] * (1.0 - t)));
+        assert!(sky(20..80) < hazy - 0.02, "{} vs hazy {hazy}", sky(20..80));
+    }
 
     #[test]
     fn new_curves_are_validated_but_saved_curves_still_load_and_render() {
@@ -1360,6 +1308,12 @@ mod tests {
         let mut nr = noisy.clone();
         develop(&mut nr, w, h, &CameraRaw { noise_luminance: 80.0, ..Default::default() }, false);
         assert!(var(&nr) < var(&noisy) * 0.5);
+        // Out-of-range noise settings are held to their 0..=100 range, not turned into huge radii.
+        let mut wild = noisy.clone();
+        let hostile =
+            CameraRaw { noise_luminance: 1.0e30, noise_color: 1.0e30, noise_luminance_detail: 1.0e30, noise_color_detail: 1.0e30, ..Default::default() };
+        develop(&mut wild, w, h, &hostile, false);
+        assert!(wild.iter().all(|q| q[0].is_finite()));
         let mut sh = noisy.clone();
         develop(&mut sh, w, h, &CameraRaw { sharpen_amount: 100.0, ..Default::default() }, false);
         assert!(var(&sh) > var(&noisy));
@@ -1378,140 +1332,127 @@ mod tests {
     }
 
     #[test]
+    fn calibration_keeps_the_develop_off_the_per_pixel_gpu_stages() {
+        // The per-pixel stages (the Camera Raw dialog's GPU preview) don't run Calibration, so
+        // settings with it must fall back to the CPU develop instead of previewing without it.
+        for p in [
+            CameraRaw { shadow_tint: 40.0, ..Default::default() },
+            CameraRaw { calibration_hue: [0.0, 0.0, 30.0], whites: 20.0, ..Default::default() },
+            CameraRaw { calibration_sat: [-50.0, 0.0, 0.0], exposure: 0.5, ..Default::default() },
+        ] {
+            assert!(!p.spatial());
+            assert!(per_pixel(&p, 2, 2, false, Some((0.0, 1.0))).is_none(), "{p:?}");
+        }
+        assert!(per_pixel(&CameraRaw { exposure: 0.5, ..Default::default() }, 2, 2, false, None).is_some());
+    }
+
+    #[test]
+    fn calibration_turns_primaries_keeps_neutrals_and_tints_shadows() {
+        let w = calibration_weights(0.0);
+        assert!((w[0] - 1.0).abs() < 1e-6, "pure red is all red primary: {w:?}");
+        let w = calibration_weights(60.0);
+        assert!((w[0] - 0.5).abs() < 1e-6 && (w[1] - 0.5).abs() < 1e-6, "yellow is half red, half green: {w:?}");
+        let w = calibration_weights(300.0);
+        assert!((w[2] - 0.5).abs() < 1e-6 && (w[0] - 0.5).abs() < 1e-6, "magenta wraps round: {w:?}");
+        let (none, zero) = ([0.0f32; 3], [0.0f32; 3]);
+        let grey = calibrate([0.3, 0.3, 0.3], [100.0, -100.0, 50.0], [100.0, -100.0, 100.0]);
+        assert!(grey.iter().all(|v| (v - 0.3).abs() < 1e-5), "greys are untouched: {grey:?}");
+        // Red turned towards green: it gains green, keeps its luminance.
+        let red = calibrate([0.5, 0.0, 0.0], [100.0, 0.0, 0.0], zero);
+        assert!(red[1] > 0.05 && (red[1] / red[0] - 0.5).abs() < 0.02 && red[2] < 1e-6, "red turns 30° towards green (orange): {red:?}");
+        assert!((luma(red) - luma([0.5, 0.0, 0.0])).abs() < 1e-4, "luminance kept: {red:?}");
+        // Blue at saturation −100 is grey; green at −50 is paler.
+        let blue = calibrate([0.0, 0.0, 0.8], none, [0.0, 0.0, -100.0]);
+        assert!((blue[0] - blue[1]).abs() < 1e-5 && (blue[1] - blue[2]).abs() < 1e-5, "blue at −100 saturation is grey: {blue:?}");
+        let green = calibrate([0.2, 0.8, 0.2], none, [0.0, -50.0, 0.0]);
+        assert!(green[0] > 0.2 && green[1] < 0.8, "green at −50 is paler: {green:?}");
+        // A primary's sliders leave the other primaries alone.
+        let unchanged = calibrate([0.0, 0.0, 0.8], [100.0, 100.0, 0.0], [100.0, 100.0, 0.0]);
+        assert!(unchanged.iter().zip([0.0, 0.0, 0.8]).all(|(a, b)| (a - b).abs() < 1e-5), "{unchanged:?}");
+        // Shadows tint: magenta lifts red and blue over green in a dark pixel, keeps luminance,
+        // and leaves white alone.
+        let dark = shadow_tint([0.02, 0.02, 0.02], 1.0);
+        assert!(dark[0] > dark[1] && dark[2] > dark[1], "{dark:?}");
+        assert!((luma(dark) - 0.02).abs() < 1e-4, "luminance kept: {dark:?}");
+        let green = shadow_tint([0.02, 0.02, 0.02], -1.0);
+        assert!(green[1] > green[0], "{green:?}");
+        let white = shadow_tint([1.0, 1.0, 1.0], 1.0);
+        assert!(white.iter().all(|v| (v - 1.0).abs() < 1e-3), "white is not tinted: {white:?}");
+        // Through develop: neutral settings are an identity, a tint changes dark pixels only.
+        let mut p = CameraRaw::default();
+        assert!(p.is_identity());
+        p.shadow_tint = 100.0;
+        assert!(!p.is_identity());
+        let mut px = vec![[0.1, 0.1, 0.1, 1.0], [0.95, 0.95, 0.95, 1.0]];
+        develop(&mut px, 2, 1, &p, false);
+        assert!(px[0][0] > px[0][1], "dark grey turns magenta: {:?}", px[0]);
+        assert!((px[1][0] - px[1][1]).abs() < 0.01, "near-white stays neutral: {:?}", px[1]);
+        p = CameraRaw::default();
+        p.calibration_hue[2] = 100.0;
+        let mut px = vec![[0.0, 0.0, 0.8, 1.0]];
+        develop(&mut px, 1, 1, &p, false);
+        assert!(px[0][0] > 0.05, "blue turned towards red: {:?}", px[0]);
+    }
+
+    #[test]
+    fn auto_tone_brightens_dark_and_darkens_bright_images() {
+        let mut p = CameraRaw::default();
+        auto_tone(&[], &mut p);
+        assert_eq!(p, CameraRaw::default(), "no pixels: nothing changes");
+        let dark: Vec<[f32; 4]> = (0..4096)
+            .map(|i| {
+                let v = 0.05 + (i % 64) as f32 / 64.0 * 0.15;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        auto_tone(&dark, &mut p);
+        assert!(p.exposure > 0.5, "a dark image gets exposure: {}", p.exposure);
+        assert!(p.shadows > 0.0, "and lifted shadows: {}", p.shadows);
+        let mut p = CameraRaw::default();
+        let bright: Vec<[f32; 4]> = (0..4096)
+            .map(|i| {
+                let v = 0.8 + (i % 64) as f32 / 64.0 * 0.19;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        auto_tone(&bright, &mut p);
+        assert!(p.exposure < -0.5, "a bright image loses exposure: {}", p.exposure);
+        assert!(p.highlights < 0.0, "and its highlights come down: {}", p.highlights);
+        let mut p = CameraRaw::default();
+        let good: Vec<[f32; 4]> = (0..4096)
+            .map(|i| {
+                let v = 0.04 + (i % 64) as f32 / 63.0 * 0.92;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        auto_tone(&good, &mut p);
+        assert!(p.exposure.abs() < 0.3 && p.blacks.abs() < 10.0 && p.whites.abs() < 10.0, "a full-range image is left nearly alone: {p:?}");
+        assert!(p.saturation == 0.0 && p.hsl_neutral(), "other panels untouched");
+    }
+
+    #[test]
     fn float_documents_keep_overrange() {
         let mut a = vec![[2.0f32, 1.5, 0.5, 1.0]; 16];
         develop(&mut a, 4, 4, &CameraRaw { exposure: 0.5, ..Default::default() }, true);
         assert!(a[0][0] > 2.0);
     }
 
+    /// A Gaussian narrower than 0.3 px has no box radii, so it returns its input unchanged, and
+    /// Texture on a proxy that small changes nothing.
     #[test]
-    fn mismatched_buffers_are_left_alone() {
-        let mut a = img(4, 4);
-        let b = a.clone();
-        develop(&mut a, 5, 4, &CameraRaw { exposure: 1.0, ..Default::default() }, false);
-        develop(&mut a, usize::MAX, 2, &CameraRaw { exposure: 1.0, ..Default::default() }, false);
-        assert_eq!(a, b);
-        assert_eq!(Developer::default().develop(&b, 0, 3, 3, &CameraRaw { exposure: 1.0, ..Default::default() }, false), b);
-    }
-
-    /// Every setting at a non-default value (one at a time), as JSON.
-    fn each_setting_moved() -> Vec<(String, CameraRaw)> {
-        let base = serde_json::to_value(CameraRaw::default()).unwrap();
-        let mut out = Vec::new();
-        for (key, value) in base.as_object().unwrap() {
-            let moved = match (key.as_str(), value) {
-                ("pixelScale" | "encodingGamma", _) => continue,
-                ("vignetteStyle", _) => serde_json::json!("paintOverlay"),
-                ("blackAndWhite", _) => serde_json::json!(true),
-                ("curveSplits", _) => serde_json::json!([20, 45, 80]),
-                (_, serde_json::Value::Array(a)) if a.len() == 8 => serde_json::json!([30, 30, 30, 30, 30, 30, 30, 30]),
-                (_, serde_json::Value::Array(_)) => serde_json::json!([[0, 20], [255, 235]]),
-                (_, serde_json::Value::Object(_)) => serde_json::json!({"hue": 200, "sat": 40, "lum": 20}),
-                ("seed", _) => serde_json::json!(9),
-                (_, serde_json::Value::Number(n)) => serde_json::json!(n.as_f64().unwrap() + if key == "exposure" { 0.7 } else { 23.0 }),
-                _ => panic!("untested setting {key}"),
-            };
-            // Effects and seed only show with an effect on.
-            let mut j = base.clone();
-            j[key] = moved;
-            if key.starts_with("vignette") || key == "seed" || key.starts_with("grain") {
-                j["vignetteAmount"] = serde_json::json!(-40);
-                j["grainAmount"] = serde_json::json!(30);
-            }
-            if key.starts_with("sharpen") {
-                j["sharpenAmount"] = serde_json::json!(60);
-            }
-            if key.starts_with("noise") {
-                j["noiseLuminance"] = serde_json::json!(40);
-                j["noiseColor"] = serde_json::json!(40);
-            }
-            if key.starts_with("curve") {
-                j["curveShadows"] = serde_json::json!(30);
-            }
-            if key.starts_with("grade") {
-                j["gradeShadows"] = serde_json::json!({"hue": 30, "sat": 50, "lum": 10});
-            }
-            if key == "bwMix" {
-                j["blackAndWhite"] = serde_json::json!(true);
-            }
-            out.push((key.clone(), serde_json::from_value(j).unwrap()));
-        }
-        out
-    }
-
-    #[test]
-    fn the_developer_reuses_stages_and_matches_develop_for_every_setting() {
-        let (w, h) = (40, 30);
-        let src = img(w, h);
-        let fresh = |p: &CameraRaw| {
-            let mut a = src.clone();
-            develop(&mut a, w, h, p, false);
-            a
-        };
-        let warm = CameraRaw { shadows: 40.0, clarity: 20.0, vibrance: 10.0, ..Default::default() };
-        let mut dev = Developer::default();
-        assert_eq!(dev.develop(&src, 1, w, h, &warm, false), fresh(&warm));
-        // Every single change, from a warm cache holding `warm`'s stages, equals a fresh develop:
-        // a setting missing from its stage's key would return a stale result here.
-        for (key, moved) in each_setting_moved() {
-            let p = CameraRaw { shadows: warm.shadows + moved.shadows, clarity: warm.clarity + moved.clarity, ..moved };
-            assert_eq!(dev.develop(&src, 1, w, h, &p, false), fresh(&p), "{key}");
-            assert_eq!(dev.develop(&src, 1, w, h, &warm, false), fresh(&warm), "back from {key}");
-            assert_ne!(fresh(&p), fresh(&warm), "{key} changes the image");
-        }
-        // A new source drops the kept stages.
-        let other: Vec<[f32; 4]> = src.iter().map(|q| [q[2], q[0], q[1], 1.0]).collect();
-        let mut a = other.clone();
-        develop(&mut a, w, h, &warm, false);
-        assert_eq!(dev.develop(&other, 2, w, h, &warm, false), a);
-        assert_eq!(dev.develop(&src, 2, w, h, &CameraRaw::default(), false), src, "identity");
-    }
-
-    #[test]
-    fn black_and_white_and_its_mix() {
-        let (w, h) = (16, 8);
-        let px: Vec<[f32; 4]> = (0..w * h).map(|i| if i % 2 == 0 { [0.8, 0.2, 0.2, 1.0] } else { [0.2, 0.3, 0.8, 1.0] }).collect();
-        let run = |p: CameraRaw| {
-            let mut a = px.clone();
-            develop(&mut a, w, h, &p, false);
-            a
-        };
-        let bw = run(CameraRaw { black_and_white: true, vibrance: 100.0, hsl_sat: [100.0; 8], ..Default::default() });
-        assert!(bw.iter().all(|q| q[0] == q[1] && q[1] == q[2]), "grey, whatever Vibrance and HSL say");
-        let mut mix = [0.0; 8];
-        mix[0] = 100.0;
-        let lighter_reds = run(CameraRaw { black_and_white: true, bw_mix: mix, ..Default::default() });
-        assert!(lighter_reds[0][0] > bw[0][0] + 0.1, "reds lighter: {} vs {}", lighter_reds[0][0], bw[0][0]);
-        assert!((lighter_reds[1][0] - bw[1][0]).abs() < 1e-4, "blues untouched");
-        // Grading still tints a black-and-white image (split toning).
-        let toned = run(CameraRaw { black_and_white: true, grade_shadows: Wheel { hue: 220.0, sat: 80.0, lum: 0.0 }, ..Default::default() });
-        assert!(toned[1][2] > toned[1][0]);
-        // The mix alone (Color treatment) does nothing.
-        assert_eq!(run(CameraRaw { bw_mix: mix, ..Default::default() }), px);
-    }
-
-    #[test]
-    fn calibration_turns_primaries_and_keeps_neutrals() {
-        let neutral = CameraRaw { calibration_red_hue: 60.0, calibration_green_sat: -50.0, calibration_blue_hue: -40.0, ..Default::default() };
-        let mut greys: Vec<[f32; 4]> = (0..16).map(|i| [i as f32 / 15.0; 4]).map(|q| [q[0], q[0], q[0], 1.0]).collect();
-        let before = greys.clone();
-        develop(&mut greys, 4, 4, &neutral, false);
-        for (a, b) in greys.iter().zip(&before) {
-            assert!((a[0] - b[0]).abs() < 1e-3 && (a[0] - a[1]).abs() < 1e-3 && (a[1] - a[2]).abs() < 1e-3, "{a:?} {b:?}");
-        }
-        let red = || vec![[0.8f32, 0.2, 0.2, 1.0]; 4];
-        let mut a = red();
-        develop(&mut a, 2, 2, &CameraRaw { calibration_red_hue: 100.0, ..Default::default() }, false);
-        assert!(a[0][1] > 0.25, "red turns toward orange: {:?}", a[0]);
-        let mut b = red();
-        develop(&mut b, 2, 2, &CameraRaw { calibration_red_sat: -100.0, ..Default::default() }, false);
-        assert!(b[0][0] - b[0][1] < 0.5, "less saturated reds: {:?}", b[0]);
-        let mut s = vec![[0.1f32, 0.1, 0.1, 1.0]; 4];
-        develop(&mut s, 2, 2, &CameraRaw { calibration_shadows_tint: 100.0, ..Default::default() }, false);
-        assert!(s[0][1] < s[0][0] - 0.005, "magenta shadows: {:?}", s[0]);
-        // Out-of-range values are clamped, never non-finite.
-        let mut x = red();
-        develop(&mut x, 2, 2, &CameraRaw { calibration_red_hue: 1e30, calibration_blue_sat: -1e30, calibration_shadows_tint: 1e30, ..Default::default() }, false);
-        assert!(x.iter().flatten().all(|v| v.is_finite()));
+    fn a_gaussian_below_0_3_px_leaves_the_image_alone() {
+        assert!(spatial::gauss_radii(0.29).is_empty());
+        assert!(!spatial::gauss_radii(0.3).is_empty());
+        let (w, h) = (64usize, 48usize);
+        let v: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 101) as f32 / 100.0).collect();
+        assert_eq!(gauss(&v, w, h, 0.29), v);
+        assert_eq!(box_means(&v, w, h, &[]), v);
+        assert_ne!(gauss(&v, w, h, 1.0), v);
+        let src: Vec<[f32; 4]> = v.iter().map(|&x| [x, 1.0 - x, 0.5 * x, 1.0]).collect();
+        let base = CameraRaw { contrast: 10.0, pixel_scale: 0.1, ..Default::default() };
+        let (mut plain, mut textured) = (src.clone(), src);
+        develop(&mut plain, w, h, &base, false);
+        develop(&mut textured, w, h, &CameraRaw { texture: 80.0, ..base }, false);
+        assert_eq!(plain, textured);
     }
 }

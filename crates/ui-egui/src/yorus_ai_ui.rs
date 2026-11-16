@@ -20,9 +20,17 @@ const MODELS: &[(&str, &str)] = &[
     ("nano-banana-2.1", "Nano Banana 2.1"),
     ("ideogram-4-5-precise-edit", "Ideogram 4.5 Precise Edit"),
     ("flux-3", "FLUX 3"),
-    ("seedream-5-pro", "Seedream 5 Pro"),
-    ("gpt-image-2", "GPT Image 2"),
+    ("seedream-5.5", "Seedream 5.5"),
 ];
+/// Saved choices from earlier builds and what they become: Seedream 5 Pro was replaced by
+/// Seedream 5.5; GPT Image through an OpenAI API key was removed (Codex keeps its own image
+/// generation through the ChatGPT account).
+const RETIRED_MODELS: &[(&str, &str)] = &[("seedream-5-pro", "seedream-5.5"), ("gpt-image-2", "nano-banana-2.1")];
+/// Seedream 5.5 backgrounds: opaque keeps an edit's pixels solid; transparent asks for a PNG
+/// with alpha (sprites, icons, VFX); auto lets the model decide.
+const BACKGROUNDS: &[&str] = &["opaque", "transparent", "auto"];
+/// Seedream 5.5 Layer Separation: the most images one request returns, base included.
+pub const MAX_LAYER_IMAGES: u32 = 100;
 const RATIOS: &[&str] = &["auto", "1:1", "16:9", "21:9", "3:2", "4:3", "5:4", "4:5", "3:4", "9:16", "2:3"];
 
 pub struct DirectRequest {
@@ -37,6 +45,12 @@ pub struct DirectRequest {
     pub mask: Option<Vec<u8>>,
     pub references: Vec<Vec<u8>>,
     pub input_size: [u32; 2],
+    /// Seedream 5.5 generation: `opaque`, `transparent` or `auto`.
+    pub background: String,
+    /// Seedream 5.5 Layer Separation: images to return at most (2..=100, base included).
+    pub max_layers: u32,
+    /// Seedream 5.5 Layer Separation: read the text on text layers (names them by it).
+    pub text_layers: bool,
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -66,7 +80,6 @@ pub enum DirectEvent {
 pub struct DirectKeys {
     pub replicate: bool,
     pub byteplus: bool,
-    pub openai: bool,
 }
 
 pub type DirectGenerateFn = Box<dyn Fn(DirectRequest, Sender<DirectEvent>)>;
@@ -87,6 +100,15 @@ pub struct State {
     pub scale_factor: u32,
     pub layer_prompt: String,
     pub layer_resolution: String,
+    /// Seedream 5.5 background for generation (`BACKGROUNDS`).
+    pub background: String,
+    /// Layer Separation: most images per request, base included.
+    pub layer_max: u32,
+    /// Layer Separation: read text layers' text.
+    pub layer_text: bool,
+    /// A result with more pixels than the selection enlarges the document instead of being
+    /// scaled down (`ai.apply` `"fit":"grow"`); the layer keeps its place and size.
+    pub grow_document: bool,
     pub new_canvas: bool,
     pub upscale_new_canvas: bool,
     pub width: u32,
@@ -110,6 +132,10 @@ impl Default for State {
             scale_factor: 2,
             layer_prompt: String::new(),
             layer_resolution: "1K".into(),
+            background: "opaque".into(),
+            layer_max: 17,
+            layer_text: false,
+            grow_document: true,
             new_canvas: false,
             upscale_new_canvas: false,
             width: 1024,
@@ -232,9 +258,9 @@ fn disabled_reason(app: &PhotocraftApp, operation: &str) -> Option<String> {
 /// Enablement describes the current panel defaults; parameters may choose another model or
 /// a fresh canvas. Credentials are deliberately absent from both metadata and parameters.
 pub fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
-    let remix = r#"{"model":"nano-banana-2.1"|"ideogram-4-5-precise-edit"|"flux-3"|"seedream-5-pro"|"gpt-image-2"?,"prompt":string?,"mode":"selection"|"canvas"?,"ratio":"auto"|"1:1"|"16:9"|"21:9"|"3:2"|"4:3"|"5:4"|"4:5"|"3:4"|"9:16"|"2:3"? (model-dependent),"resolution":string? (Nano/GPT:1K|2K|4K; Seedream:1K|2K; FLUX:768sq|1k|1.5k|2k|4k),"quality":"low"|"medium"|"high"|"very_low"? (very_low:Ideogram only),"width":1..16384?,"height":1..16384?} Uses current prompt/options and additional reference images from the panel when omitted. Seedream prompts <=4000 characters; others <=64KiB. Selected-area mode captures visible merged pixels, original geometry and exact coverage before starting, then adds a separate layer there. Canvas mode uses only the prompt/additional references and opens an independent canvas at width/height (<=16777216 pixels). Ideogram requires selection mode and sends the selection's black-edit/white-preserve mask. Provider key must already be configured; requests bill that API account. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status and use yorusai.cancel to stop."#;
+    let remix = r#"{"model":"nano-banana-2.1"|"ideogram-4-5-precise-edit"|"flux-3"|"seedream-5.5"?,"prompt":string?,"mode":"selection"|"canvas"?,"ratio":"auto"|"1:1"|"16:9"|"21:9"|"3:2"|"4:3"|"5:4"|"4:5"|"3:4"|"9:16"|"2:3"? (model-dependent),"resolution":string? (Nano:1K|2K|4K; Seedream:1K|1.5K|2K; FLUX:768sq|1k|1.5k|2k|4k),"quality":"low"|"medium"|"high"|"very_low"? (Ideogram),"background":"opaque"|"transparent"|"auto"? (Seedream 5.5 on BytePlus: transparent returns a PNG with alpha),"width":1..16384?,"height":1..16384?} Uses current prompt/options and additional reference images from the panel when omitted. Seedream 5.5 runs on BytePlus ModelArk (with only a Replicate key it falls back to Seedream 5.0 Pro, which Replicate hosts). Seedream prompts <=4000 characters; others <=64KiB. Selected-area mode captures visible merged pixels, original geometry and exact coverage before starting, then adds a separate layer there. Canvas mode uses only the prompt/additional references and opens an independent canvas at width/height (<=16777216 pixels). Ideogram requires selection mode and sends the selection's black-edit/white-preserve mask. Provider key must already be configured; requests bill that API account. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status and use yorusai.cancel to stop."#;
     let upscale = r#"{"scaleFactor":2..8?,"mode":"selection"|"canvas"?} Crystal Upscale via Replicate. Requires a nonempty selection and saved Replicate key. Captures the original visible merged rectangle and selection coverage. Selection mode adds a separate layer at the same position/size; explicit canvas mode opens a fresh canvas at captured width*factor by height*factor. Output must fit <=16777216 pixels. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status. Provider bills the configured API account."#;
-    let layers = r#"{"prompt":string? (optional instructions, <=4000 characters),"resolution":"1K"|"2K"?} Layer Separation via BytePlus ModelArk. Requires an open image and configured BytePlus key. Uses the selected area and original selection coverage when present, otherwise the whole visible canvas. Downloads positioned transparent artifacts, preserves their z-order, and adds separate layers inside that saved original frame. Does not change source layers or a newer selection; closed/resized source retains results for explicit recovery. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status. Provider bills the configured API account."#;
+    let layers = r#"{"prompt":string? (optional instructions, <=4000 characters),"resolution":"1K"|"1.5K"|"2K"?,"maxLayers":2..100? (images returned at most, base included; each is billed),"textLayers":bool? (read text layers' text and name them by it)} Layer Separation with Seedream 5.5 via BytePlus ModelArk. Requires an open image and configured BytePlus key. Uses the selected area and original selection coverage when present, otherwise the whole visible canvas. Downloads positioned transparent artifacts, preserves their z-order, and adds separate layers inside that saved original frame. Does not change source layers or a newer selection; closed/resized source retains results for explicit recovery. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status. Provider bills the configured API account."#;
     let run = format!(
         "{{\"operation\":\"remix\"|\"upscale\"|\"layers\"?, ...operation parameters}} Defaults to the visible YorusAi workflow. Remix: {remix} Upscale: {upscale} Layers: {layers}"
     );
@@ -244,7 +270,7 @@ pub fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
         ("yorusai.remix", "Generate YorusAi remix", Some("remix"), remix.into()),
         ("yorusai.upscale", "Upscale with YorusAi", Some("upscale"), upscale.into()),
         ("yorusai.layers", "Separate layers with YorusAi", Some("layers"), layers.into()),
-        ("yorusai.inspect", "Inspect YorusAi settings", None, "{} -> {settings,runtime:{busy,keys:{replicate,byteplus,openai},keysLoaded,referenceCount,retainedResults}}. Only key presence is returned; key values and image bytes are never exposed.".into()),
+        ("yorusai.inspect", "Inspect YorusAi settings", None, "{} -> {settings,runtime:{busy,keys:{replicate,byteplus},keysLoaded,referenceCount,retainedResults}}. Only key presence is returned; key values and image bytes are never exposed.".into()),
         ("yorusai.cancel", "Stop YorusAi operation", None, "{} -> {stopping:bool}. Requests cancellation of the current Direct provider operation; late image results are not placed. Idempotent when idle.".into()),
     ].into_iter().map(|(id, label, operation, params)| {
         let reason = operation.and_then(|operation| disabled_reason(app, operation));
@@ -260,8 +286,8 @@ fn status(app: &mut PhotocraftApp, message: impl Into<String>, error: bool) {
 
 fn provider(model: &str, keys: DirectKeys) -> &'static str {
     match model {
-        "gpt-image-2" => "openai",
-        "seedream-5-pro" if keys.byteplus => "byteplus",
+        // Seedream 5.5 is on BytePlus ModelArk only; Replicate still hosts Seedream 5.0 Pro.
+        "seedream-5.5" if keys.byteplus || !keys.replicate => "byteplus",
         _ => "replicate",
     }
 }
@@ -270,7 +296,6 @@ fn has_key(keys: DirectKeys, name: &str) -> bool {
     match name {
         "replicate" => keys.replicate,
         "byteplus" => keys.byteplus,
-        "openai" => keys.openai,
         _ => false,
     }
 }
@@ -279,7 +304,6 @@ fn provider_name(name: &str) -> &'static str {
     match name {
         "replicate" => "Replicate",
         "byteplus" => "BytePlus ModelArk",
-        "openai" => "OpenAI",
         _ => "Provider",
     }
 }
@@ -287,19 +311,21 @@ fn provider_name(name: &str) -> &'static str {
 fn resolutions(model: &str) -> &'static [&'static str] {
     match model {
         "flux-3" => &["768sq", "1k", "1.5k", "2k", "4k"],
-        "seedream-5-pro" => &["1K", "2K"],
+        "seedream-5.5" => &["1K", "1.5K", "2K"],
         _ => &["1K", "2K", "4K"],
     }
 }
 
 fn ratios(model: &str) -> Vec<&'static str> {
-    if model == "gpt-image-2" {
-        return vec!["auto", "1:1", "3:2", "2:3", "16:9", "9:16"];
-    }
-    RATIOS.iter().copied().filter(|r| model != "seedream-5-pro" || !matches!(*r, "5:4" | "4:5")).collect()
+    // Seedream takes any ratio as explicit pixels on BytePlus, but its Replicate fallback lists
+    // fixed ratios without 5:4 and 4:5.
+    RATIOS.iter().copied().filter(|r| model != "seedream-5.5" || !matches!(*r, "5:4" | "4:5")).collect()
 }
 
 fn normalize(s: &mut State) {
+    if let Some((_, replacement)) = RETIRED_MODELS.iter().find(|(old, _)| *old == s.model) {
+        s.model = (*replacement).into();
+    }
     if !MODELS.iter().any(|(model, _)| *model == s.model) {
         s.model = "nano-banana-2.1".into();
     }
@@ -320,9 +346,13 @@ fn normalize(s: &mut State) {
     if !["very_low", "low", "medium", "high"].contains(&s.ideogram_quality.as_str()) {
         s.ideogram_quality = "medium".into();
     }
-    if !["1K", "2K"].contains(&s.layer_resolution.as_str()) {
+    if !["1K", "1.5K", "2K"].contains(&s.layer_resolution.as_str()) {
         s.layer_resolution = "1K".into();
     }
+    if !BACKGROUNDS.contains(&s.background.as_str()) {
+        s.background = "opaque".into();
+    }
+    s.layer_max = s.layer_max.clamp(2, MAX_LAYER_IMAGES);
     s.scale_factor = s.scale_factor.clamp(2, 8);
     if s.model == "ideogram-4-5-precise-edit" {
         s.new_canvas = false;
@@ -416,7 +446,7 @@ fn start(app: &mut PhotocraftApp, operation: &str) -> Result<Value, String> {
     let model = match operation {
         "remix" => s.model.clone(),
         "upscale" => "crystal-upscaler".into(),
-        "layers" => "seedream-5-pro".into(),
+        "layers" => "seedream-5.5".into(),
         _ => return Err("Unknown YorusAi operation.".into()),
     };
     let route = match operation {
@@ -431,7 +461,7 @@ fn start(app: &mut PhotocraftApp, operation: &str) -> Result<Value, String> {
     if operation == "remix" && prompt.trim().is_empty() {
         return Err("Enter a prompt first.".into());
     }
-    if prompt.len() > 64 << 10 || ((model == "seedream-5-pro" || operation == "layers") && prompt.chars().count() > 4000) {
+    if prompt.len() > 64 << 10 || ((model == "seedream-5.5" || operation == "layers") && prompt.chars().count() > 4000) {
         return Err("This model accepts prompts up to 4,000 characters (64 KiB maximum).".into());
     }
     let (reference, mask, placement) = capture(app, operation)?;
@@ -462,6 +492,9 @@ fn start(app: &mut PhotocraftApp, operation: &str) -> Result<Value, String> {
         mask,
         references: if operation == "remix" { app.yorus_ai_runtime.references.iter().map(|r| r.bytes.clone()).collect() } else { Vec::new() },
         input_size,
+        background: s.background.clone(),
+        max_layers: s.layer_max,
+        text_layers: s.layer_text,
         cancel: cancel.clone(),
     };
     let (tx, rx) = mpsc::channel();
@@ -480,7 +513,8 @@ fn apply(app: &mut PhotocraftApp, image: &DirectImage) -> Result<Value, String> 
     let name: String = if image.name.trim().is_empty() { "YorusAi result".into() } else { image.name.chars().take(64).collect() };
     let data = STANDARD.encode(&image.bytes);
     let (command, params, document) = if let Some(target) = &placement.target {
-        ("ai.apply", json!({"target":target,"data":data,"name":name}), target.get("document").and_then(Value::as_u64))
+        let fit = if app.ui.yorus_ai.grow_document { "grow" } else { "exact" };
+        ("ai.apply", json!({"target":target,"data":data,"name":name,"fit":fit}), target.get("document").and_then(Value::as_u64))
     } else {
         ("ai.open", json!({"data":data,"name":name,"width":placement.size[0],"height":placement.size[1]}), None)
     };
@@ -499,11 +533,16 @@ fn apply(app: &mut PhotocraftApp, image: &DirectImage) -> Result<Value, String> 
     }
     app.sync_views();
     if let Ok(value) = &result
-        && let Some(layer) = value.get("layer")
         && let Some(placement) = app.yorus_ai_runtime.placement.as_mut()
         && let Some(target) = placement.target.as_mut()
     {
-        target["anchorLayer"] = layer.clone();
+        // A grown document has a new size: the rest of this request uses the new target.
+        if let Some(grown) = value.get("target") {
+            *target = grown.clone();
+        }
+        if let Some(layer) = value.get("layers").and_then(Value::as_array).and_then(|layers| layers.last()).or_else(|| value.get("layer")) {
+            target["anchorLayer"] = layer.clone();
+        }
     }
     result
 }
@@ -605,7 +644,7 @@ fn save_key(app: &mut PhotocraftApp, remove: bool) -> Result<(), String> {
         return Err("Wait for the key operation to finish.".into());
     }
     let provider = app.yorus_ai_runtime.key_provider.clone();
-    if !["replicate", "byteplus", "openai"].contains(&provider.as_str()) {
+    if !["replicate", "byteplus"].contains(&provider.as_str()) {
         return Err("Choose a provider first.".into());
     }
     let key = if remove { String::new() } else { std::mem::take(&mut app.yorus_ai_runtime.key_input).trim().to_owned() };
@@ -683,7 +722,13 @@ fn configure(app: &mut PhotocraftApp, params: &Value, operation: &str) -> Result
         normalize(&mut state);
     }
     let fields = if operation == "remix" {
-        vec![("prompt", &mut state.prompt), ("ratio", &mut state.ratio), ("resolution", &mut state.resolution), ("quality", &mut state.quality)]
+        vec![
+            ("prompt", &mut state.prompt),
+            ("ratio", &mut state.ratio),
+            ("resolution", &mut state.resolution),
+            ("quality", &mut state.quality),
+            ("background", &mut state.background),
+        ]
     } else if operation == "layers" {
         vec![("prompt", &mut state.layer_prompt), ("resolution", &mut state.layer_resolution)]
     } else {
@@ -697,6 +742,18 @@ fn configure(app: &mut PhotocraftApp, params: &Value, operation: &str) -> Result
     for (key, output) in [("layerPrompt", &mut state.layer_prompt), ("layerResolution", &mut state.layer_resolution)] {
         if let Some(value) = params.get(key) {
             *output = value.as_str().filter(|s| s.len() <= 64 << 10).ok_or_else(|| format!("{key} must be bounded text."))?.into();
+        }
+    }
+    if operation == "layers" {
+        if let Some(value) = params.get("maxLayers") {
+            state.layer_max = value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| (2..=MAX_LAYER_IMAGES).contains(n))
+                .ok_or("maxLayers must be a whole number from 2 to 100.")?;
+        }
+        if let Some(value) = params.get("textLayers") {
+            state.layer_text = value.as_bool().ok_or("textLayers must be true or false.")?;
         }
     }
     if let Some(value) = params.get("mode") {
@@ -742,8 +799,11 @@ fn configure(app: &mut PhotocraftApp, params: &Value, operation: &str) -> Result
     {
         state.ideogram_quality = quality.into();
     }
-    if operation == "layers" && !["1K", "2K"].contains(&state.layer_resolution.as_str()) {
-        return Err("Layer resolution must be 1K or 2K.".into());
+    if operation == "layers" && !["1K", "1.5K", "2K"].contains(&state.layer_resolution.as_str()) {
+        return Err("Layer resolution must be 1K, 1.5K or 2K.".into());
+    }
+    if operation == "remix" && !BACKGROUNDS.contains(&state.background.as_str()) {
+        return Err("background must be opaque, transparent or auto.".into());
     }
     state.open = true;
     state.tab = operation.into();
@@ -757,6 +817,8 @@ fn string_options(ui: &mut egui::Ui, id: &str, label: &str, current: &mut String
         .iter()
         .map(|v| match *v {
             "auto" => "Auto".into(),
+            "opaque" => "Opaque".into(),
+            "transparent" => "Transparent (PNG with alpha)".into(),
             "very_low" => "Very low".into(),
             "low" => "Low".into(),
             "medium" => "Medium".into(),
@@ -771,27 +833,13 @@ fn string_options(ui: &mut egui::Ui, id: &str, label: &str, current: &mut String
         .collect();
     let choices: Vec<(String, &str)> = options.iter().zip(labels.iter()).map(|(value, label)| ((*value).into(), label.as_str())).collect();
     let width = ui.available_width();
-    crate::widgets::dropdown(ui, id, current, &choices, width)
+    crate::widgets::dropdown(ui, id, label, current, &choices, width)
 }
 
 fn preset_size(state: &State) -> [u32; 2] {
-    if state.model == "gpt-image-2" {
-        if state.ratio == "auto" {
-            return [state.width, state.height];
-        }
-        let tier = match state.resolution.as_str() {
-            "2K" => 1,
-            "4K" => 2,
-            _ => 0,
-        };
-        let matrix = match state.ratio.as_str() {
-            "1:1" => [[1024, 1024], [2048, 2048], [2880, 2880]],
-            "2:3" => [[1024, 1536], [1376, 2064], [2336, 3504]],
-            "16:9" => [[1280, 720], [2048, 1152], [3840, 2160]],
-            "9:16" => [[720, 1280], [1152, 2048], [2160, 3840]],
-            _ => [[1536, 1024], [2064, 1376], [3504, 2336]],
-        };
-        return matrix.get(tier).copied().unwrap_or([1024, 1024]);
+    // Auto keeps the canvas size typed in; a ratio sets it from the resolution's long edge.
+    if state.ratio == "auto" {
+        return [state.width, state.height];
     }
     let edge = match state.resolution.to_lowercase().as_str() {
         "768sq" => 768.0,
@@ -928,18 +976,20 @@ fn key_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if current.is_empty() {
         app.yorus_ai_runtime.key_provider = "replicate".into();
     }
-    let options = [("replicate".into(), "Replicate"), ("byteplus".into(), "BytePlus ModelArk"), ("openai".into(), "OpenAI")];
+    if !["replicate", "byteplus"].contains(&app.yorus_ai_runtime.key_provider.as_str()) {
+        app.yorus_ai_runtime.key_provider = "replicate".into();
+    }
+    let options = [("replicate".into(), "Replicate"), ("byteplus".into(), "BytePlus ModelArk")];
     let width = ui.available_width();
-    crate::widgets::dropdown(ui, "yorus-key-provider", &mut app.yorus_ai_runtime.key_provider, &options, width);
+    crate::widgets::dropdown(ui, "yorus-key-provider", "Provider", &mut app.yorus_ai_runtime.key_provider, &options, width);
     if current != app.yorus_ai_runtime.key_provider {
         app.yorus_ai_runtime.key_input.clear();
     }
     let provider = &app.yorus_ai_runtime.key_provider;
     ui.colored_label(t.text_dim, if has_key(app.yorus_ai_runtime.keys, provider) { "Key saved" } else { "No key saved" });
     ui.small(match provider.as_str() {
-        "byteplus" => "Seedream 5 Pro direct and Layer Separation",
-        "openai" => "GPT Image 2 · API billing",
-        _ => "Nano Banana, Ideogram, FLUX, Seedream and Crystal Upscale",
+        "byteplus" => "Seedream 5.5 and Layer Separation. Activate Seedream 5.5 in the ModelArk console first.",
+        _ => "Nano Banana, Ideogram, FLUX, Seedream 5.0 Pro and Crystal Upscale",
     });
     ui.add(
         egui::TextEdit::singleline(&mut app.yorus_ai_runtime.key_input).password(true).hint_text("Paste API key").char_limit(4096).desired_width(f32::INFINITY),
@@ -1044,10 +1094,16 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 let options = choices.iter().map(|(n, label)| (*n, label.as_str())).collect::<Vec<_>>();
                 ui.label("Scale factor");
                 let width = ui.available_width();
-                crate::widgets::dropdown(ui, "yorus-upscale-factor", &mut state.scale_factor, &options, width);
+                crate::widgets::dropdown(ui, "yorus-upscale-factor", "Scale factor", &mut state.scale_factor, &options, width);
                 crate::widgets::checkbox(ui, &mut state.upscale_new_canvas, "Open at larger size in a new canvas");
                 if !state.upscale_new_canvas {
-                    ui.small("The new layer fills the original selected rectangle.");
+                    crate::widgets::checkbox(ui, &mut state.grow_document, "Grow canvas to fit")
+                        .on_hover_text("Keep every upscaled pixel: the whole canvas is enlarged and the layer keeps its place and size.");
+                    ui.small(if state.grow_document {
+                        "The canvas is enlarged as a whole; the layer keeps its place and size."
+                    } else {
+                        "The new layer fills the original selected rectangle."
+                    });
                 }
             }
             "layers" => {
@@ -1062,7 +1118,12 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         .desired_width(f32::INFINITY)
                         .char_limit(4000),
                 );
-                string_options(ui, "yorus-layers-size", "Output resolution", &mut state.layer_resolution, &["1K", "2K"]);
+                string_options(ui, "yorus-layers-size", "Output resolution", &mut state.layer_resolution, &["1K", "1.5K", "2K"]);
+                ui.label("Most layers");
+                ui.add(egui::Slider::new(&mut state.layer_max, 2..=MAX_LAYER_IMAGES).text("images"));
+                ui.small("The base counts as one; each returned layer is billed.");
+                crate::widgets::checkbox(ui, &mut state.layer_text, "Name text layers by their text")
+                    .on_hover_text("Seedream reads the text in each text layer and names the layer after it.");
             }
             _ => {
                 ui.label("Model");
@@ -1076,7 +1137,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     .collect();
                 let options: Vec<(String, &str)> = labels.iter().map(|(id, label)| (id.clone(), label.as_str())).collect();
                 let width = ui.available_width();
-                let changed_model = crate::widgets::dropdown(ui, "yorus-model", &mut state.model, &options, width);
+                let changed_model = crate::widgets::dropdown(ui, "yorus-model", "Model", &mut state.model, &options, width);
                 normalize(&mut state);
                 let previous_destination = state.new_canvas;
                 ui.add_enabled_ui(state.model != "ideogram-4-5-precise-edit", |ui| {
@@ -1084,6 +1145,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 });
                 if state.new_canvas {
                     ui.small("Uses your prompt and additional references.");
+                } else {
+                    crate::widgets::checkbox(ui, &mut state.grow_document, "Grow canvas to fit")
+                        .on_hover_text("When the result has more pixels than the selection, enlarge the whole canvas instead of shrinking the result. The layer keeps its place and size.");
                 }
                 if state.model == "ideogram-4-5-precise-edit" {
                     ui.small("Edits the selection's exact shape and keeps its original framing.");
@@ -1091,10 +1155,16 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 } else {
                     let changed_resolution = string_options(ui, "yorus-resolution", "Resolution", &mut state.resolution, resolutions(&state.model));
                     let changed_ratio = string_options(ui, "yorus-ratio", "Aspect ratio", &mut state.ratio, &ratios(&state.model));
-                    if state.model == "gpt-image-2" {
-                        string_options(ui, "yorus-quality", "Quality", &mut state.quality, &["low", "medium", "high"]);
+                    if state.model == "seedream-5.5" {
+                        string_options(ui, "yorus-background", "Background", &mut state.background, BACKGROUNDS);
+                        if state.background == "transparent" {
+                            ui.small("Returns a PNG with alpha: sprites, icons and effect textures.");
+                        }
                         if state.ratio == "auto" {
-                            ui.small("Auto follows the selection or canvas shape, up to 3:1.");
+                            ui.small("Auto follows the selection or canvas shape.");
+                        }
+                        if provider(&state.model, app.yorus_ai_runtime.keys) == "replicate" {
+                            ui.small("Seedream 5.5 needs a BytePlus key; with Replicate this runs Seedream 5.0 Pro.");
                         }
                     }
                     if state.new_canvas {
@@ -1115,7 +1185,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         .hint_text("Describe the image or edit…")
                         .desired_rows(5)
                         .desired_width(f32::INFINITY)
-                        .char_limit(if state.model == "seedream-5-pro" { 4000 } else { 16000 }),
+                        .char_limit(if state.model == "seedream-5.5" { 4000 } else { 16000 }),
                 );
                 builder_ui(ui, &mut state, app.yorus_ai_runtime.references.len());
             }
@@ -1125,7 +1195,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             reference_ui(app, ui);
             if state.model == "ideogram-4-5-precise-edit" {
                 ui.small("Ideogram uses up to 3 references with a selection mask, or 4 without one.");
-            } else if matches!(state.model.as_str(), "flux-3" | "seedream-5-pro")
+            } else if matches!(state.model.as_str(), "flux-3" | "seedream-5.5")
                 && app.yorus_ai_runtime.references.len() > if state.new_canvas { 10 } else { 9 }
             {
                 ui.small("This model uses the first 10 input images, including the selected area.");
@@ -1205,7 +1275,7 @@ mod tests {
             PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services { yorus_ai_generate: Some(Box::new(generate)), ..Default::default() });
         app.run("file.new", json!({"width":40,"height":30})).unwrap();
         app.run("select.rect", json!({"x":5,"y":7,"width":12,"height":10})).unwrap();
-        app.yorus_ai_runtime.keys = DirectKeys { replicate: true, byteplus: true, openai: true };
+        app.yorus_ai_runtime.keys = DirectKeys { replicate: true, byteplus: true };
         app.yorus_ai_runtime.keys_loaded = true;
         app.ui.yorus_ai.prompt = "Restyle the selected image".into();
         app
@@ -1320,7 +1390,7 @@ mod tests {
             }
             let image = Image::from_u8(width, height, ChannelLayout::Rgb, pixels).unwrap();
             let bytes = photocraft_codecs::encode(&image, format, &Default::default()).unwrap();
-            for new_canvas in [false, true] {
+            for (new_canvas, grow) in [(false, false), (false, true), (true, false)] {
                 let bytes = bytes.clone();
                 let mut app = app(move |_, sender| {
                     sender
@@ -1328,16 +1398,30 @@ mod tests {
                         .unwrap();
                 });
                 app.ui.yorus_ai.new_canvas = new_canvas;
+                app.ui.yorus_ai.grow_document = grow;
                 app.ui.yorus_ai.width = 31;
                 app.ui.yorus_ai.height = 19;
                 let source = app.session.active().unwrap().doc.clone();
                 start(&mut app, "remix").unwrap();
                 poll(&mut app, &egui::Context::default());
                 assert!(!app.ui.yorus_ai.error, "{format:?}: {}", app.ui.yorus_ai.status);
-                let area = if new_canvas { Rect::new(0, 0, 31, 19) } else { Rect::new(5, 7, 17, 17) };
                 let document = &app.session.active().unwrap().doc;
+                // A result with more pixels than the 12 x 10 selection grows the whole 40 x 30
+                // canvas by one factor; the selection keeps its place relative to the canvas.
+                let k = f64::from(document.size.width) / 40.0;
+                let grows = grow && (width > 12 || height > 10);
+                assert_eq!(k > 1.0, grows, "{format:?}, grow={grow}");
+                let scaled = |v: i32| (f64::from(v) * k).round() as i32;
+                let area = if new_canvas { Rect::new(0, 0, 31, 19) } else { Rect::new(scaled(5), scaled(7), scaled(17), scaled(17)) };
                 let surface = document.layers.last().unwrap().surface().unwrap();
-                assert_eq!(surface.content_bounds(), area, "{format:?}, canvas={new_canvas}");
+                let bounds = surface.content_bounds();
+                for (got, want) in [(bounds.x0, area.x0), (bounds.y0, area.y0), (bounds.x1, area.x1), (bounds.y1, area.y1)] {
+                    assert!((got - want).abs() <= 1, "{format:?}, canvas={new_canvas}, grow={grow}: {bounds:?} vs {area:?}");
+                }
+                if grows {
+                    assert!(bounds.width() >= width && bounds.height() >= height, "every generated pixel is kept");
+                }
+                let area = bounds;
                 for (x, y, color) in [
                     (area.x0, area.y0, [1.0, 0.0, 0.0]),
                     (area.x1 - 1, area.y0, [0.0, 1.0, 0.0]),
@@ -1354,8 +1438,10 @@ mod tests {
                     assert_eq!(app.session.documents().len(), 2);
                     assert_eq!(app.session.documents()[0].doc, source);
                     assert_eq!((document.size.width, document.size.height), (31, 19));
-                } else {
+                } else if !grows {
                     assert_eq!(document.layers[0], source.layers[0]);
+                } else {
+                    assert_eq!(document.layers.len(), source.layers.len() + 1, "the base layer is resampled, not replaced");
                 }
             }
         }
@@ -1545,13 +1631,15 @@ mod tests {
 
     #[test]
     fn option_matrices_and_prompt_builder_preserve_plugin_contract() {
-        let keys = DirectKeys { replicate: true, byteplus: true, openai: true };
-        assert_eq!(provider("seedream-5-pro", keys), "byteplus");
-        assert_eq!(provider("seedream-5-pro", DirectKeys { byteplus: false, ..keys }), "replicate");
-        assert_eq!(resolutions("seedream-5-pro"), &["1K", "2K"]);
-        assert!(ratios("gpt-image-2").contains(&"auto"));
-        let state = State { model: "gpt-image-2".into(), resolution: "4K".into(), ratio: "16:9".into(), ..Default::default() };
-        assert_eq!(preset_size(&state), [3840, 2160]);
+        let keys = DirectKeys { replicate: true, byteplus: true };
+        assert_eq!(provider("seedream-5.5", keys), "byteplus");
+        assert_eq!(provider("seedream-5.5", DirectKeys { byteplus: false, ..keys }), "replicate", "Replicate hosts Seedream 5.0 Pro");
+        assert_eq!(provider("seedream-5.5", DirectKeys::default()), "byteplus", "with no key, ask for the BytePlus one");
+        assert_eq!(resolutions("seedream-5.5"), &["1K", "1.5K", "2K"]);
+        assert!(!ratios("seedream-5.5").contains(&"5:4"));
+        let state = State { model: "nano-banana-2.1".into(), resolution: "4K".into(), ratio: "16:9".into(), ..Default::default() };
+        let [width, height] = preset_size(&state);
+        assert!(width > height && width >= 3840, "{width}x{height}");
         let builder = PromptBuilder { style_reference: true, ..Default::default() };
         let prompt = make_prompt(&builder);
         assert!(prompt.contains("IMAGE B"));
@@ -1560,17 +1648,21 @@ mod tests {
     }
 
     #[test]
-    fn gpt_auto_preserves_captured_or_canvas_shape_and_saved_explicit_preferences() {
-        let mut default = State { model: "gpt-image-2".into(), ..Default::default() };
-        normalize(&mut default);
-        assert_eq!(default.ratio, "auto", "changing model must not replace Auto with landscape");
-        let mut saved = State { model: "gpt-image-2".into(), ratio: "3:2".into(), resolution: "4K".into(), ..Default::default() };
+    fn retired_models_migrate_and_seedream_auto_keeps_the_captured_or_canvas_shape() {
+        let mut old_gpt = State { model: "gpt-image-2".into(), ..Default::default() };
+        normalize(&mut old_gpt);
+        assert_eq!(old_gpt.model, "nano-banana-2.1", "the removed OpenAI API model falls back to the default");
+        let mut old_seedream = State { model: "seedream-5-pro".into(), ratio: "3:2".into(), resolution: "2K".into(), ..Default::default() };
+        normalize(&mut old_seedream);
+        assert_eq!((old_seedream.model.as_str(), old_seedream.ratio.as_str(), old_seedream.resolution.as_str()), ("seedream-5.5", "3:2", "2K"));
+        let mut saved = State { model: "seedream-5.5".into(), ratio: "3:2".into(), resolution: "1.5K".into(), background: "transparent".into(), ..Default::default() };
         let before = saved.clone();
         normalize(&mut saved);
         assert_eq!(saved, before, "existing valid explicit settings remain unchanged");
         for new_canvas in [false, true] {
             let mut app = app(move |request, sender| {
-                assert_eq!(request.model, "gpt-image-2");
+                assert_eq!(request.model, "seedream-5.5");
+                assert_eq!(request.background, "transparent");
                 assert_eq!(request.ratio, "auto");
                 assert_eq!(request.input_size, if new_canvas { [31, 19] } else { [11, 17] });
                 assert_eq!(request.reference.is_none(), new_canvas);
@@ -1580,7 +1672,7 @@ mod tests {
             handle(
                 &mut app,
                 "yorusai.remix",
-                &json!({"model":"gpt-image-2","ratio":"auto","mode":if new_canvas {"canvas"} else {"selection"},"width":31,"height":19}),
+                &json!({"model":"seedream-5.5","ratio":"auto","background":"transparent","mode":if new_canvas {"canvas"} else {"selection"},"width":31,"height":19}),
             )
             .unwrap()
             .unwrap();
@@ -1596,13 +1688,16 @@ mod tests {
     fn layer_and_upscale_config_do_not_inherit_incompatible_remix_settings() {
         let mut app = app(|request, sender| {
             assert_eq!(request.operation, "layers");
+            assert_eq!(request.model, "seedream-5.5");
             assert_eq!(request.resolution, "2K");
             assert_eq!(request.prompt, "Separate the plants");
+            assert_eq!((request.max_layers, request.text_layers), (30, true));
             sender.send(DirectEvent::Completed(vec![result("Plants", 0)])).unwrap();
         });
         app.ui.yorus_ai.model = "flux-3".into();
         app.ui.yorus_ai.resolution = "1k".into();
-        handle(&mut app, "yorusai.layers", &json!({"prompt":"Separate the plants","resolution":"2K"})).unwrap().unwrap();
+        handle(&mut app, "yorusai.layers", &json!({"prompt":"Separate the plants","resolution":"2K","maxLayers":30,"textLayers":true})).unwrap().unwrap();
+        assert!(configure(&mut app, &json!({"maxLayers":101}), "layers").is_err());
         assert_eq!(app.ui.yorus_ai.model, "flux-3");
         assert_eq!(app.ui.yorus_ai.resolution, "1k");
         assert_eq!(app.ui.yorus_ai.prompt, "Restyle the selected image");
@@ -1617,16 +1712,18 @@ mod tests {
     fn native_key_callbacks_only_return_presence_and_clear_typed_secret() {
         let mut app = ready_app();
         app.services.yorus_ai_save_key = Some(Box::new(|provider, key, sender| {
-            assert_eq!(provider, "openai");
+            assert_eq!(provider, "byteplus");
             assert_eq!(key, "test-dummy-key");
-            sender.send(Ok(DirectKeys { openai: true, ..Default::default() })).unwrap();
+            sender.send(Ok(DirectKeys { byteplus: true, ..Default::default() })).unwrap();
         }));
-        app.yorus_ai_runtime.key_provider = "openai".into();
+        app.yorus_ai_runtime.key_provider = "byteplus".into();
         app.yorus_ai_runtime.key_input = "test-dummy-key".into();
         save_key(&mut app, false).unwrap();
         assert!(app.yorus_ai_runtime.key_input.is_empty());
         poll(&mut app, &egui::Context::default());
-        assert!(app.yorus_ai_runtime.keys.openai);
+        assert!(app.yorus_ai_runtime.keys.byteplus);
+        app.yorus_ai_runtime.key_provider = "openai".into();
+        assert!(save_key(&mut app, false).is_err(), "OpenAI API keys are no longer accepted");
         assert!(!app.yorus_ai_runtime.inspect().to_string().contains("test-dummy-key"));
         assert_eq!(app.ui.yorus_ai.status, "Provider keys updated.");
     }
@@ -1677,7 +1774,10 @@ mod tests {
                 assert!(params.contains("scaleFactor") && params.contains("2..8"));
             }
             if id == "yorusai.layers" {
-                assert!(params.contains("prompt") && params.contains("resolution") && params.contains("BytePlus"));
+                assert!(params.contains("prompt") && params.contains("resolution") && params.contains("BytePlus") && params.contains("maxLayers"));
+            }
+            if id == "yorusai.remix" {
+                assert!(!params.contains("gpt-image") && params.contains("seedream-5.5") && params.contains("background"));
             }
         }
         app.session = photocraft_engine::Session::new();

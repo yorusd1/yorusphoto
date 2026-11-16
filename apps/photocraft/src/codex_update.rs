@@ -19,7 +19,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const INTERVAL: u64 = 24 * 60 * 60;
 const MAX_META: u64 = 2 << 20;
 const MAX_STATE: u64 = 512 << 10;
-const MAX_DOWNLOAD: u64 = 256 << 20;
+// Codex's Windows package is about 180 MiB compressed (0.169: 515 MB unpacked) and growing.
+const MAX_DOWNLOAD: u64 = 512 << 20;
 const MAX_UNPACKED: u64 = 1 << 30;
 const MAX_FILE: u64 = 768 << 20;
 const MAX_ENTRIES: usize = 2048;
@@ -142,7 +143,8 @@ fn install(
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
+        // The whole download may take a while on a slow connection; Stop still cancels it.
+        .timeout(Duration::from_secs(30 * 60))
         .user_agent("yorusphoto-codex-updater")
         .build()
         .map_err(|_| "Could not prepare the secure Codex update connection.")?;

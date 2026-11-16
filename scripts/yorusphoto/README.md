@@ -7,7 +7,7 @@ Cargo, and the Windows toolchain described in [the build notes](../../docs/yorus
 ## Fetch the pinned Codex runtime
 
 ```powershell
-python scripts/yorusphoto/fetch_codex_runtime.py --version 0.163.0
+python scripts/yorusphoto/fetch_codex_runtime.py --version 0.169.0
 ```
 
 The script downloads the official `@openai/codex` wrapper and Windows native package
@@ -16,7 +16,7 @@ extraction without archive links, checks the native executable's version, and re
 the distribution's notices and a file-hash manifest. It runs only `codex --version`;
 it does not sign in, generate images, run a chat, or download model weights.
 
-The verified files are written below `.toolchain/codex-latest/0.163.0/`. An existing
+The verified files are written below `.toolchain/codex-latest/0.169.0/`. An existing
 version directory is left unchanged. `--source-dir` can select another repository
 checkout. A newer runtime requires choosing its exact stable version explicitly.
 The pinned version records this build's input; it does not claim to be the newest
@@ -24,7 +24,14 @@ release available today.
 
 ## Build and assemble a portable copy
 
+The interface translations are a build input since PhotoCraft 0.23.1: check out
+[craft-i18n](https://github.com/storytold/craft-i18n) at the commit in `craft-i18n.rev`
+below `.toolchain/craft-i18n` (the wrapper sets `CRAFT_I18N_DIR` to it, and requires it for
+release builds). Without it the editor is English only.
+
 ```powershell
+git clone https://github.com/storytold/craft-i18n .toolchain/craft-i18n
+git -C .toolchain/craft-i18n checkout (Get-Content craft-i18n.rev)
 powershell -File packaging/windows/cargo-yorusphoto.ps1 build --release -p photocraft -p photocraft-cli
 powershell -File packaging/windows/package-yorusphoto.ps1 -Name yorusphoto-portable
 ```

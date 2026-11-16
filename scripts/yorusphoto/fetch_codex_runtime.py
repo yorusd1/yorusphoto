@@ -104,7 +104,7 @@ def extract_verified(archive: Path, destination: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="0.163.0")
+    parser.add_argument("--version", default="0.169.0")
     parser.add_argument("--source-dir", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args()
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version), "Choose an exact stable version.")

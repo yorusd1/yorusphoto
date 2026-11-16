@@ -1,6 +1,9 @@
 //! Account telemetry and app-owned saved-chat operations over Codex's public protocol.
 
-use super::*;
+use super::{
+    AppServer, AtomicBool, CHAT_INSTRUCTIONS, CodexWorkspaceAction, CodexWorkspaceEvent, CodexWorkspaceRequest, Duration, Instant, Ordering, Path,
+    TURN_TIMEOUT, Value, VecDeque, fs, json, mpsc,
+};
 
 const MAX_MODELS: usize = 256;
 const MAX_MODEL_PAGES: usize = 8;
@@ -127,6 +130,8 @@ pub(super) fn queued_notification(method: &str) -> bool {
                 | "thread/compacted"
                 | "thread/name/updated"
                 | "model/rerouted"
+                | "turn/plan/updated"
+                | "warning"
         )
 }
 
@@ -277,9 +282,17 @@ pub(super) fn telemetry(method: &str, params: &Value, thread_id: Option<&str>) -
             json!({"state":if method == "item/started" {"running"} else {"complete"},"threadId":id,"turnId":params.get("turnId").and_then(Value::as_str)}),
         )),
         "thread/compacted" => Some(("compaction".into(), json!({"state":"complete","threadId":id}))),
+        // Codex moved this turn to another model (a safety reroute). The user's own choice stays
+        // as it is; the editor only says so.
         "model/rerouted" => {
-            let model = bounded(params.get("toModel").or_else(|| params.get("model")), 256)?;
-            Some(("model".into(), json!({"model":model})))
+            let to = bounded(params.get("toModel").or_else(|| params.get("model")), 256)?;
+            let mut data = json!({"threadId":id,"toModel":to});
+            for key in ["fromModel", "reason"] {
+                if let Some(value) = bounded(params.get(key), 256) {
+                    data[key] = json!(value);
+                }
+            }
+            Some(("rerouted".into(), data))
         }
         _ => None,
     }
@@ -621,7 +634,7 @@ fn perform_inner(
             }
             let result = server.rpc(
                 "thread/list",
-                json!({"cursor":cursor,"limit":100,"sortKey":"updated_at","archived":archived,"searchTerm":search,"modelProviders":["openai"]}),
+                json!({"cursor":cursor,"limit":100,"sortKey":"updated_at","archived":archived,"searchTerm":search,"modelProviders":["openai"],"currentAccountOnly":true}),
             )?;
             let data = result.get("data").and_then(Value::as_array).ok_or("Codex did not return its saved chats.")?;
             let threads = data
@@ -743,6 +756,7 @@ fn await_compaction(server: &mut impl Connection, id: &str, cancel: &AtomicBool,
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Arc, TemporaryWorkspace};
     use super::*;
 
     #[derive(Default)]
@@ -911,6 +925,18 @@ mod tests {
         assert!(empty.pointer("/tokenUsage/modelContextWindow").is_none());
         for method in ["thread/tokenUsage/updated", "account/rateLimits/updated", "turn/started"] {
             assert!(queued_notification(method));
+        }
+    }
+
+    #[test]
+    fn a_model_reroute_is_its_own_telemetry_never_a_model_choice() {
+        let params = json!({"threadId":"fixture-thread","turnId":"t","fromModel":"chosen","toModel":"safer","reason":"highRiskCyberActivity","private":"x"});
+        let (kind, data) = telemetry("model/rerouted", &params, Some("fixture-thread")).expect("reroute");
+        assert_eq!(kind, "rerouted");
+        assert_eq!(data, json!({"threadId":"fixture-thread","toModel":"safer","fromModel":"chosen","reason":"highRiskCyberActivity"}));
+        assert!(telemetry("model/rerouted", &params, Some("another-thread")).is_none());
+        for method in ["turn/plan/updated", "warning"] {
+            assert!(queued_notification(method), "{method}");
         }
     }
 

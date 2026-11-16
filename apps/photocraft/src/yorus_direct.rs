@@ -18,15 +18,24 @@ const MAX_INPUT: usize = 128 * 1024 * 1024;
 const MAX_JSON: usize = 48 * 1024 * 1024;
 // Match the engine's ai.apply/ai.open decode budget so paid output remains placeable.
 const MAX_PIXELS: u64 = 16_777_216;
-const MAX_LAYERS: usize = 17;
+/// Seedream 5.5 Layer Separation returns a base and up to 99 layers.
+const MAX_LAYERS: usize = 100;
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const NANO: &str = "google/nano-banana-2.1";
 const NANO_FALLBACK: &str = "google/nano-banana-2";
+/// Replicate does not host Seedream 5.5 yet; with only a Replicate key, Seedream runs 5.0 Pro there.
 const SEEDREAM: &str = "bytedance/seedream-5-pro";
 const IDEOGRAM: &str = "ideogram-ai/ideogram-4-5-precise-edit";
 const FLUX: &str = "black-forest-labs/flux-3-image";
 const CRYSTAL: &str = "philz1337x/crystal-upscaler:a69878d2abf96b6bab59327590164c9ce54993b41bbade14999c2b136079f891";
-const BYTEPLUS_MODEL: &str = "dola-seedream-5-0-pro-260628";
+/// Seedream 5.5 on BytePlus ModelArk (ap-southeast-1), released November 2026.
+const BYTEPLUS_MODEL: &str = "dola-seedream-5-5-261028";
+/// Seedream 5.5 explicit sizes: total pixels and aspect-ratio bounds (BytePlus API reference).
+const SEEDREAM_MIN_PIXELS: f64 = 921_600.0;
+const SEEDREAM_MAX_PIXELS: f64 = 4_624_220.0;
+/// Layer Separation input: total pixels from 512x512 to 6000x6000, PNG or JPEG.
+const LAYER_MIN_PIXELS: u64 = 512 * 512;
+const LAYER_MAX_PIXELS: u64 = 6000 * 6000;
 
 pub fn generate(request: DirectRequest, events: Sender<DirectEvent>) {
     let failure = events.clone();
@@ -93,21 +102,19 @@ pub fn save_key(provider: String, key: String, reply: Sender<Result<DirectKeys, 
 struct Credentials {
     replicate: String,
     byteplus: String,
-    openai: String,
 }
 
 impl Credentials {
     fn load() -> Result<Self, String> {
-        Ok(Self { replicate: load_key("replicate")?, byteplus: load_key("byteplus")?, openai: load_key("openai")? })
+        Ok(Self { replicate: load_key("replicate")?, byteplus: load_key("byteplus")? })
     }
     fn status(&self) -> DirectKeys {
-        DirectKeys { replicate: !self.replicate.is_empty(), byteplus: !self.byteplus.is_empty(), openai: !self.openai.is_empty() }
+        DirectKeys { replicate: !self.replicate.is_empty(), byteplus: !self.byteplus.is_empty() }
     }
     fn require(&self, provider: &str) -> Result<&str, String> {
         let value = match provider {
             "replicate" => &self.replicate,
             "byteplus" => &self.byteplus,
-            "openai" => &self.openai,
             _ => return Err("Unknown API provider.".into()),
         };
         if value.is_empty() { Err(format!("Add your {} API key first.", provider_label(provider)?)) } else { Ok(value) }
@@ -118,7 +125,6 @@ fn provider_label(provider: &str) -> Result<&'static str, String> {
     match provider {
         "replicate" => Ok("Replicate"),
         "byteplus" => Ok("BytePlus ModelArk"),
-        "openai" => Ok("OpenAI"),
         _ => Err("Unknown API provider.".into()),
     }
 }
@@ -162,7 +168,6 @@ struct Backend {
     client: Client,
     replicate: String,
     byteplus: String,
-    openai: String,
     poll_interval: Duration,
 }
 
@@ -178,7 +183,6 @@ impl Backend {
             client,
             replicate: "https://api.replicate.com/v1".into(),
             byteplus: "https://ark.ap-southeast.bytepluses.com/api/v3".into(),
-            openai: "https://api.openai.com/v1".into(),
             poll_interval: Duration::from_millis(2500),
         })
     }
@@ -186,7 +190,6 @@ impl Backend {
     fn verify_key(&self, provider: &str, key: &str) -> Result<(), String> {
         let url = match provider {
             "replicate" => format!("{}/account", self.replicate),
-            "openai" => format!("{}/models", self.openai),
             "byteplus" => return Ok(()),
             _ => return Err("Unknown API provider.".into()),
         };
@@ -218,11 +221,13 @@ impl Backend {
     fn generate(&self, request: &DirectRequest, keys: &Credentials, events: &Sender<DirectEvent>) -> Result<Vec<DirectImage>, String> {
         check_cancel(&request.cancel)?;
         progress(events, "Preparing Direct API request…");
-        if request.operation == "layers" || (request.model == "seedream-5-pro" && !keys.byteplus.is_empty()) {
+        // Seedream 5.5 is on BytePlus ModelArk; Replicate only hosts Seedream 5.0 Pro.
+        let seedream = request.model == "seedream-5.5";
+        if request.operation == "layers" || (seedream && (!keys.byteplus.is_empty() || keys.replicate.is_empty())) {
             return self.byteplus(request, keys.require("byteplus")?, events);
         }
-        if request.model == "gpt-image-2" && request.operation == "remix" {
-            return self.openai(request, keys.require("openai")?, events);
+        if seedream && request.operation == "remix" {
+            progress(events, "Seedream 5.5 needs a BytePlus key; Replicate runs Seedream 5.0 Pro instead…");
         }
         let key = keys.require("replicate")?;
         progress(events, "Uploading reference images to Replicate…");
@@ -335,62 +340,32 @@ impl Backend {
         }
     }
 
-    fn openai(&self, request: &DirectRequest, key: &str, events: &Sender<DirectEvent>) -> Result<Vec<DirectImage>, String> {
-        let size = openai_size(&request.ratio, &request.resolution, request.input_size)?;
-        let quality = if ["low", "medium"].contains(&request.quality.as_str()) { request.quality.as_str() } else { "high" };
-        let limited_aspect = request.ratio == "auto"
-            && (u64::from(request.input_size[0]) > u64::from(request.input_size[1]) * 3
-                || u64::from(request.input_size[1]) > u64::from(request.input_size[0]) * 3);
-        progress(
-            events,
-            &format!(
-                "Generating with GPT Image 2 at {size} on your OpenAI API account{}…",
-                if limited_aspect { " (Auto limited to the provider's 3:1 shape)" } else { "" }
-            ),
-        );
-        let images: Vec<_> = request.reference.iter().chain(request.references.iter()).take(14).collect();
-        let builder = if images.is_empty() {
-            self.client
-                .post(format!("{}/images/generations", self.openai))
-                .json(&json!({"model":"gpt-image-2","prompt":request.prompt,"size":size,"quality":quality,"n":1,"output_format":"png"}))
-        } else {
-            let mut form = multipart::Form::new()
-                .text("model", "gpt-image-2")
-                .text("prompt", request.prompt.clone())
-                .text("size", size)
-                .text("quality", quality.to_owned())
-                .text("n", "1")
-                .text("output_format", "png");
-            for (index, bytes) in images.iter().enumerate() {
-                form = form.part("image[]", image_part(bytes, &format!("image-{index}.png"))?);
-            }
-            self.client.post(format!("{}/images/edits", self.openai)).multipart(form)
-        };
-        check_cancel(&request.cancel)?;
-        let data = self.json(builder.bearer_auth(key), "OpenAI", key)?;
-        check_cancel(&request.cancel)?;
-        let encoded = data.pointer("/data/0/b64_json").and_then(Value::as_str).ok_or("OpenAI returned no image data.")?;
-        let bytes = decode_image_base64(encoded)?;
-        Ok(vec![DirectImage { bytes, name: "GPT Image 2".into(), z_index: 0, bounds: None }])
-    }
-
     fn byteplus(&self, request: &DirectRequest, key: &str, events: &Sender<DirectEvent>) -> Result<Vec<DirectImage>, String> {
         let layers = request.operation == "layers";
         let mut images = Vec::new();
         for bytes in request.reference.iter().chain(request.references.iter()).take(if layers { 1 } else { 10 }) {
-            images.push(data_url(bytes)?);
+            images.push(if layers { data_url(&layer_input(bytes)?)? } else { data_url(bytes)? });
         }
-        let mut payload = json!({"model":BYTEPLUS_MODEL,"size":if request.resolution == "2K" { "2K" } else { "1K" },"output_format":"png","response_format":"url","watermark":false});
+        // Seedream 5.5 adds an "AI generated" mark unless told not to.
+        let mut payload = json!({"model":BYTEPLUS_MODEL,"output_format":"png","response_format":"url","watermark":false});
         if !request.prompt.is_empty() {
             payload["prompt"] = json!(request.prompt);
         }
         if layers {
+            // Layer Separation takes a resolution tier only, and refuses a `background`.
+            payload["size"] = json!(if ["1.5K", "2K"].contains(&request.resolution.as_str()) { request.resolution.as_str() } else { "1K" });
             payload["image"] = json!(images.first().ok_or("Layer separation needs a reference image.")?);
             payload["layer_decomposition"] = json!(true);
-        } else if !images.is_empty() {
-            payload["image"] = json!(images);
+            let most = request.max_layers.clamp(2, MAX_LAYERS as u32);
+            payload["layer_decomposition_options"] = json!({"max_images":most,"text_recognition":request.text_layers});
+        } else {
+            payload["size"] = json!(seedream_size(&request.ratio, &request.resolution, request.input_size)?);
+            payload["background"] = json!(if ["transparent", "auto"].contains(&request.background.as_str()) { request.background.as_str() } else { "opaque" });
+            if !images.is_empty() {
+                payload["image"] = json!(images);
+            }
         }
-        progress(events, if layers { "Separating layers with BytePlus ModelArk…" } else { "Generating with Seedream 5 Pro on BytePlus ModelArk…" });
+        progress(events, if layers { "Separating layers with Seedream 5.5 on BytePlus ModelArk…" } else { "Generating with Seedream 5.5 on BytePlus ModelArk…" });
         check_cancel(&request.cancel)?;
         let data = self.json(self.client.post(format!("{}/images/generations", self.byteplus)).bearer_auth(key).json(&payload), "BytePlus", key)?;
         if data.get("error").is_some_and(|error| !error.is_null()) {
@@ -398,7 +373,7 @@ impl Backend {
         }
         let items = data.get("data").and_then(Value::as_array).filter(|items| !items.is_empty()).ok_or("BytePlus returned no image outputs.")?;
         if items.len() > MAX_LAYERS {
-            return Err("BytePlus returned more than 17 image layers.".into());
+            return Err("BytePlus returned more than 100 images.".into());
         }
         for item in items {
             if item.get("error").is_some_and(|error| !error.is_null()) {
@@ -432,9 +407,13 @@ impl Backend {
             }
             results.push(DirectImage {
                 bytes,
+                // A text layer read with text recognition is named by its text.
                 name: item
-                    .get("name")
+                    .pointer("/text_recognition/text")
                     .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .or_else(|| item.get("name").and_then(Value::as_str))
                     .filter(|name| !name.is_empty())
                     .unwrap_or(if z_index == 0 { "Separated base" } else { "Separated layer" })
                     .chars()
@@ -513,6 +492,10 @@ fn provider_error(provider: &str, status: u16, data: &Value, key: &str) -> Strin
     // Authentication errors may echo a masked key fragment, so replacing only the full
     // key is insufficient. UI status is persisted: never forward these error bodies.
     let lowered = detail.to_ascii_lowercase();
+    let code = data.pointer("/error/code").and_then(Value::as_str).unwrap_or_default();
+    if provider == "BytePlus" && (code == "ModelNotOpen" || lowered.contains("has not activated the model")) {
+        return "BytePlus: Seedream 5.5 is not activated for this account. Open the ModelArk console (region ap-southeast-1), choose Model activation and activate Seedream 5.5, then try again.".into();
+    }
     let key_prefix: String = key.chars().take(8).collect();
     if matches!(status, 401 | 403)
         || ["authorization", "bearer ", "api key", "api_key", "api token", "api_token"].iter().any(|marker| lowered.contains(marker))
@@ -540,6 +523,7 @@ fn data_url(bytes: &[u8]) -> Result<String, String> {
 fn image_part(bytes: &[u8], filename: &str) -> Result<multipart::Part, String> {
     multipart::Part::bytes(bytes.to_vec()).file_name(filename.to_owned()).mime_str(image_type(bytes)?).map_err(|_| "The image content type is invalid.".into())
 }
+#[cfg(test)]
 fn decode_image_base64(encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.len() > MAX_IMAGE.div_ceil(3) * 4 {
         return Err("The generated image exceeds 32 MiB.".into());
@@ -566,7 +550,7 @@ fn validate(request: &DirectRequest) -> Result<(), String> {
         return Err("Unknown Direct API operation.".into());
     }
     if request.operation == "remix" {
-        replicate_model(&request.model).or_else(|error| if request.model == "gpt-image-2" { Ok("") } else { Err(error) })?;
+        replicate_model(&request.model)?;
         if request.prompt.trim().is_empty() {
             return Err("Enter a prompt first.".into());
         }
@@ -574,7 +558,7 @@ fn validate(request: &DirectRequest) -> Result<(), String> {
     if request.prompt.len() > 128 * 1024 {
         return Err("The prompt exceeds 128 KiB.".into());
     }
-    if (request.model == "seedream-5-pro" || request.operation == "layers") && request.prompt.chars().count() > 4000 {
+    if (request.model == "seedream-5.5" || request.operation == "layers") && request.prompt.chars().count() > 4000 {
         return Err("Seedream prompts must contain 4,000 characters or fewer.".into());
     }
     if (request.operation != "remix" || request.model == "ideogram-4-5-precise-edit") && request.reference.is_none() {
@@ -606,11 +590,64 @@ fn validate(request: &DirectRequest) -> Result<(), String> {
     }
     Ok(())
 }
+/// Seedream 5.5's explicit `WIDTHxHEIGHT`: the requested ratio (or, for Auto, the captured area or
+/// new canvas), at about the tier's pixel count (1K 1024², 1.5K 1536², 2K 2048²), kept inside the
+/// API's 921,600..=4,624,220 pixels and 1:16..=16:1, both sides multiples of 8.
+fn seedream_size(ratio: &str, resolution: &str, input_size: [u32; 2]) -> Result<String, String> {
+    let aspect = match ratio.split_once(':').map(|(w, h)| (w.parse::<f64>(), h.parse::<f64>())) {
+        Some((Ok(w), Ok(h))) if w > 0.0 && h > 0.0 => w / h,
+        _ if ratio == "auto" || ratio.is_empty() => {
+            let [width, height] = input_size;
+            if width == 0 || height == 0 {
+                return Err("Seedream Auto needs a nonempty selection or canvas size.".into());
+            }
+            f64::from(width) / f64::from(height)
+        }
+        _ => return Err("Unsupported Seedream aspect ratio.".into()),
+    }
+    .clamp(1.0 / 16.0, 16.0);
+    let edge: f64 = match resolution {
+        "2K" => 2048.0,
+        "1.5K" => 1536.0,
+        _ => 1024.0,
+    };
+    let pixels = (edge * edge).clamp(SEEDREAM_MIN_PIXELS, SEEDREAM_MAX_PIXELS);
+    // Round to multiples of 8, then step inside the pixel bounds the rounding may cross.
+    let side = |value: f64| ((value / 8.0).round().max(1.0) * 8.0) as u32;
+    let (mut width, mut height) = (side((pixels * aspect).sqrt()), side((pixels / aspect).sqrt()));
+    while f64::from(width) * f64::from(height) > SEEDREAM_MAX_PIXELS {
+        if width >= height { width -= 8 } else { height -= 8 }
+    }
+    while f64::from(width) * f64::from(height) < SEEDREAM_MIN_PIXELS {
+        if width <= height { width += 8 } else { height += 8 }
+    }
+    Ok(format!("{width}x{height}"))
+}
+
+/// The capture as Layer Separation accepts it: a PNG of 512x512 to 6000x6000 total pixels. A
+/// small selection is enlarged (the returned boxes are relative, so the layers still land on
+/// the original frame); a larger one is reduced.
+fn layer_input(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let source = decode_bounded(bytes)?;
+    let pixels = u64::from(source.width()) * u64::from(source.height());
+    if (LAYER_MIN_PIXELS..=LAYER_MAX_PIXELS).contains(&pixels) && photocraft_codecs::detect(bytes) == Some(Format::Png) {
+        return Ok(bytes.to_vec());
+    }
+    let target = if pixels < LAYER_MIN_PIXELS { LAYER_MIN_PIXELS } else { LAYER_MAX_PIXELS.min(pixels) };
+    let scale = (target as f64 / pixels.max(1) as f64).sqrt();
+    let width = ((f64::from(source.width()) * scale).ceil() as u32).max(1);
+    let height = ((f64::from(source.height()) * scale).ceil() as u32).max(1);
+    let rgba = image::RgbaImage::from_raw(source.width(), source.height(), source.to_rgba8()).ok_or("The captured area could not be prepared for Layer Separation.")?;
+    let resized = image::imageops::resize(&rgba, width, height, image::imageops::FilterType::CatmullRom);
+    let output = Image::from_u8(width, height, ChannelLayout::Rgba, resized.into_raw()).map_err(|_| "The captured area could not be prepared for Layer Separation.")?;
+    photocraft_codecs::encode(&output, Format::Png, &EncodeOptions { embed_metadata: false, ..Default::default() }).map_err(|_| "The captured area could not be encoded for Layer Separation.".into())
+}
+
 fn replicate_model(model: &str) -> Result<&'static str, String> {
     match model {
         "nano-banana-2.1" => Ok(NANO),
         "nano-banana-2" => Ok(NANO_FALLBACK),
-        "seedream-5-pro" => Ok(SEEDREAM),
+        "seedream-5.5" => Ok(SEEDREAM),
         "ideogram-4-5-precise-edit" => Ok(IDEOGRAM),
         "flux-3" => Ok(FLUX),
         _ => Err("Unknown Direct API image model.".into()),
@@ -628,7 +665,7 @@ fn replicate_input(request: &DirectRequest, urls: &[String]) -> Value {
         "flux-3" => {
             json!({"prompt":request.prompt,"images":urls.iter().take(10).collect::<Vec<_>>(),"aspect_ratio":if ["auto","21:9","2:1","16:9","3:2","7:5","4:3","5:4","1:1","4:5","3:4","5:7","2:3","9:16","1:2","9:21"].contains(&request.ratio.as_str()) { request.ratio.as_str() } else { "auto" },"resolution":if ["768sq","1k","1.5k","2k","4k"].contains(&request.resolution.to_lowercase().as_str()) { request.resolution.to_lowercase() } else { "1k".into() },"output_format":"jpg","output_quality":95})
         }
-        "seedream-5-pro" => {
+        "seedream-5.5" => {
             json!({"prompt":request.prompt,"image_input":urls.iter().take(10).collect::<Vec<_>>(),"size":if request.resolution == "2K" { "2K" } else { "1K" },"aspect_ratio":if ["1:1","4:3","3:4","16:9","9:16","3:2","2:3","21:9"].contains(&request.ratio.as_str()) { request.ratio.as_str() } else if urls.is_empty() { "1:1" } else { "match_input_image" },"output_format":"png"})
         }
         _ => {
@@ -644,47 +681,6 @@ fn replicate_input(request: &DirectRequest, urls: &[String]) -> Value {
             value
         }
     }
-}
-fn openai_size(ratio: &str, resolution: &str, input_size: [u32; 2]) -> Result<String, String> {
-    let index = match resolution {
-        "2K" => 1,
-        "4K" => 2,
-        _ => 0,
-    };
-    let sizes = match ratio {
-        "1:1" => ["1024x1024", "2048x2048", "2880x2880"],
-        "2:3" => ["1024x1536", "1376x2064", "2336x3504"],
-        "16:9" => ["1280x720", "2048x1152", "3840x2160"],
-        "9:16" => ["720x1280", "1152x2048", "2160x3840"],
-        "3:2" => ["1536x1024", "2064x1376", "3504x2336"],
-        "auto" => {
-            let [width, height] = input_size;
-            if width == 0 || height == 0 {
-                return Err("GPT Image Auto needs a nonempty captured area or new canvas size.".into());
-            }
-            // GPT Image 2 custom-size constraints: multiples of 16, <=3:1 aspect, and
-            // 655,360..=8,294,400 pixels. Keep Auto below the 3840px edge boundary.
-            // https://developers.openai.com/api/docs/guides/image-generation#earlier-gpt-image-models
-            let aspect = (f64::from(width) / f64::from(height)).clamp(1.0 / 3.0, 3.0);
-            let pixels: f64 = match resolution {
-                "2K" => 4_194_304.0,
-                "4K" => 8_294_400.0,
-                _ => 1_048_576.0,
-            };
-            let raw_width = (pixels * aspect).sqrt();
-            let raw_height = (pixels / aspect).sqrt();
-            let scale = (3824.0 / raw_width.max(raw_height)).min(1.0);
-            let mut width = ((raw_width * scale / 16.0).floor() as u32).saturating_mul(16);
-            let mut height = ((raw_height * scale / 16.0).floor() as u32).saturating_mul(16);
-            // Rounding each edge down can otherwise move a 3:1 frame just outside the
-            // provider's ratio limit. Placement still uses the original saved rectangle.
-            width = width.min(height.saturating_mul(3));
-            height = height.min(width.saturating_mul(3));
-            return Ok(format!("{width}x{height}"));
-        }
-        _ => return Err("GPT Image does not support the requested aspect ratio.".into()),
-    };
-    Ok(sizes.get(index).copied().unwrap_or("1024x1024").into())
 }
 fn validate_download_url(url: &reqwest::Url) -> Result<(), String> {
     #[cfg(test)]
@@ -866,11 +862,14 @@ mod tests {
             mask: None,
             references: Vec::new(),
             input_size: [2, 2],
+            background: "opaque".into(),
+            max_layers: 17,
+            text_layers: false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
     fn keys() -> Credentials {
-        Credentials { replicate: "test-only-replicate".into(), byteplus: "test-only-byteplus".into(), openai: "test-only-openai".into() }
+        Credentials { replicate: "test-only-replicate".into(), byteplus: "test-only-byteplus".into() }
     }
     fn mock(steps: impl FnOnce(&str) -> Vec<Step>) -> (Backend, mpsc::Receiver<Captured>, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("local mock listener");
@@ -925,7 +924,6 @@ mod tests {
         let mut backend = Backend::new().expect("HTTP client");
         backend.replicate = format!("{base}/v1");
         backend.byteplus = format!("{base}/v1");
-        backend.openai = format!("{base}/v1");
         backend.poll_interval = Duration::from_millis(1);
         (backend, receiver, handle)
     }
@@ -955,102 +953,6 @@ mod tests {
         assert!(calls.get(1).expect("prediction").headers.to_lowercase().contains("prefer: wait=50"));
         assert!(calls.get(4).expect("download").line.contains("/result.png"));
         assert!(!calls.get(4).expect("download").headers.to_lowercase().contains("authorization"));
-    }
-
-    #[test]
-    fn openai_edit_multipart_preserves_image_bytes_and_explicit_settings() {
-        let png = fixture();
-        let (backend, audit, server) = mock(|_| vec![step("POST", "/v1/images/edits", json!({"data":[{"b64_json":BASE64.encode(&png)}]}))]);
-        let mut request = request();
-        request.model = "gpt-image-2".into();
-        request.ratio = "16:9".into();
-        request.resolution = "4K".into();
-        let (events, _) = mpsc::channel();
-        assert_eq!(backend.generate(&request, &keys(), &events).expect("OpenAI mock").len(), 1);
-        server.join().expect("mock server");
-        let call = audit.recv().expect("edit request");
-        let text = String::from_utf8_lossy(&call.body);
-        assert!(text.contains("name=\"image[]\""));
-        assert!(text.contains("gpt-image-2"));
-        assert!(text.contains("3840x2160"));
-        assert!(text.contains("high"));
-        assert!(call.body.windows(png.len()).any(|window| window == png));
-        assert!(call.headers.to_lowercase().contains("authorization: bearer test-only-openai"));
-    }
-
-    #[test]
-    fn openai_fresh_image_uses_generation_json_without_reference_selector() {
-        let (backend, audit, server) = mock(|_| vec![step("POST", "/v1/images/generations", json!({"data":[{"b64_json":BASE64.encode(fixture())}]}))]);
-        let mut request = request();
-        request.model = "gpt-image-2".into();
-        request.reference = None;
-        request.ratio = "1:1".into();
-        let (events, _) = mpsc::channel();
-        backend.generate(&request, &keys(), &events).expect("fresh generation");
-        server.join().expect("mock server");
-        let call = audit.recv().expect("generation request");
-        let body: Value = serde_json::from_slice(&call.body).expect("generation JSON");
-        assert_eq!(body, json!({"model":"gpt-image-2","prompt":request.prompt,"size":"1024x1024","quality":"high","n":1,"output_format":"png"}));
-    }
-
-    #[test]
-    fn openai_auto_edit_uses_the_odd_portrait_capture_frame_instead_of_landscape() {
-        let png = photocraft_codecs::encode(
-            &Image::from_u8(11, 17, ChannelLayout::Rgba, [40, 150, 200, 255].repeat(11 * 17)).expect("portrait fixture"),
-            Format::Png,
-            &Default::default(),
-        )
-        .expect("portrait PNG");
-        let (backend, audit, server) = mock(|_| vec![step("POST", "/v1/images/edits", json!({"data":[{"b64_json":BASE64.encode(&png)}]}))]);
-        let mut request = request();
-        request.model = "gpt-image-2".into();
-        request.input_size = [11, 17];
-        request.reference = Some(png.clone());
-        let (events, _) = mpsc::channel();
-        backend.generate(&request, &keys(), &events).expect("portrait Auto edit");
-        server.join().expect("mock server");
-        let call = audit.recv().expect("portrait edit request");
-        let text = String::from_utf8_lossy(&call.body);
-        assert!(text.contains("name=\"size\"\r\n\r\n816x1264\r\n"), "Auto must follow the portrait capture");
-        assert!(!text.contains("1536x1024"));
-        assert!(call.body.windows(png.len()).any(|window| window == png));
-    }
-
-    #[test]
-    fn openai_auto_new_canvas_uses_its_dimensions_without_a_reference() {
-        let (backend, audit, server) = mock(|_| vec![step("POST", "/v1/images/generations", json!({"data":[{"b64_json":BASE64.encode(fixture())}]}))]);
-        let mut request = request();
-        request.model = "gpt-image-2".into();
-        request.reference = None;
-        request.input_size = [31, 31];
-        let (events, _) = mpsc::channel();
-        backend.generate(&request, &keys(), &events).expect("square Auto canvas");
-        server.join().expect("mock server");
-        let call = audit.recv().expect("square generation request");
-        let body: Value = serde_json::from_slice(&call.body).expect("generation JSON");
-        assert_eq!(body["size"], "1024x1024");
-        assert_eq!(body["prompt"], request.prompt);
-    }
-
-    #[test]
-    fn openai_auto_sizes_follow_the_source_shape_within_documented_bounds() {
-        for input in [[1, 1], [11, 17], [101, 37], [37, 101], [1, 16384], [16384, 1], [u32::MAX, u32::MAX - 1]] {
-            for resolution in ["1K", "2K", "4K"] {
-                let size = openai_size("auto", resolution, input).expect("bounded Auto size");
-                let [width, height] = parse_size(&size).expect("WIDTHxHEIGHT size");
-                assert!(width <= 3824 && height <= 3824);
-                assert_eq!(width % 16, 0);
-                assert_eq!(height % 16, 0);
-                assert!(width <= height * 3 && height <= width * 3);
-                assert!((655_360..=8_294_400).contains(&(u64::from(width) * u64::from(height))));
-                let expected = (f64::from(input[0]) / f64::from(input[1])).clamp(1.0 / 3.0, 3.0);
-                let actual = f64::from(width) / f64::from(height);
-                assert!((actual / expected - 1.0).abs() < 0.03, "{input:?} at {resolution}: {size}");
-            }
-        }
-        assert!(openai_size("auto", "1K", [0, 10]).is_err());
-        assert!(openai_size("auto", "1K", [10, 0]).is_err());
-        assert!(openai_size("unsupported", "1K", [10, 10]).is_err());
     }
 
     #[test]
@@ -1085,6 +987,13 @@ mod tests {
         assert_eq!(body.get("layer_decomposition"), Some(&json!(true)));
         assert_eq!(body.get("size"), Some(&json!("2K")));
         assert!(body.get("image").is_some_and(Value::is_string));
+        assert_eq!(body.pointer("/layer_decomposition_options/max_images"), Some(&json!(17)));
+        assert_eq!(body.get("watermark"), Some(&json!(false)));
+        assert!(body.get("background").is_none(), "Layer Separation refuses a background");
+        // The 2x2 capture was enlarged to the 512x512 minimum the API accepts.
+        let sent = body.get("image").and_then(Value::as_str).and_then(|url| url.strip_prefix("data:image/png;base64,")).expect("PNG data URL");
+        let sent = decode_bounded(&BASE64.decode(sent).expect("base64")).expect("sent PNG");
+        assert!(u64::from(sent.width()) * u64::from(sent.height()) >= LAYER_MIN_PIXELS);
     }
 
     #[test]
@@ -1095,7 +1004,7 @@ mod tests {
         assert_eq!(nano["image_input"].as_array().expect("Nano images").len(), 14);
         assert_eq!(nano["google_search"], true);
         assert_eq!(nano["image_search"], true);
-        request.model = "seedream-5-pro".into();
+        request.model = "seedream-5.5".into();
         request.resolution = "4K".into();
         let seedream = replicate_input(&request, &urls);
         assert_eq!(seedream["image_input"].as_array().expect("Seedream images").len(), 10);
@@ -1107,7 +1016,55 @@ mod tests {
         let (path, payload) = prediction_payload(CRYSTAL, &json!({"scale_factor":8}));
         assert_eq!(path, "/predictions");
         assert_eq!(payload["version"], "a69878d2abf96b6bab59327590164c9ce54993b41bbade14999c2b136079f891");
-        assert_eq!(openai_size("2:3", "2K", [2, 2]).expect("explicit portrait size"), "1376x2064");
+    }
+
+    #[test]
+    fn seedream_5_5_sizes_follow_the_ratio_or_capture_within_api_bounds() {
+        for (ratio, input) in [("auto", [11, 17]), ("auto", [1, 16384]), ("auto", [4000, 3]), ("16:9", [1, 1]), ("9:16", [1, 1]), ("1:1", [1, 1]), ("21:9", [5, 5])] {
+            for resolution in ["1K", "1.5K", "2K"] {
+                let size = seedream_size(ratio, resolution, input).expect("bounded size");
+                let [width, height] = parse_size(&size).expect("WIDTHxHEIGHT");
+                let pixels = f64::from(width) * f64::from(height);
+                assert!((SEEDREAM_MIN_PIXELS..=SEEDREAM_MAX_PIXELS).contains(&pixels), "{ratio} {resolution}: {size}");
+                assert_eq!((width % 8, height % 8), (0, 0), "{size}");
+                let aspect = f64::from(width) / f64::from(height);
+                assert!((1.0 / 16.0..=16.0).contains(&aspect), "{size}");
+            }
+        }
+        assert_eq!(seedream_size("1:1", "1K", [1, 1]).expect("square"), "1024x1024");
+        let [width, height] = parse_size(&seedream_size("auto", "2K", [11, 17]).expect("portrait")).expect("size");
+        assert!(width < height, "Auto follows a portrait capture");
+        assert!(seedream_size("auto", "1K", [0, 10]).is_err());
+        assert!(seedream_size("seven", "1K", [10, 10]).is_err());
+    }
+
+    #[test]
+    fn seedream_5_5_generation_sends_size_background_and_no_watermark() {
+        let (backend, audit, server) = mock(|base| {
+            vec![
+                step("POST", "/v1/images/generations", json!({"data":[{"url":format!("{base}/out.png"),"size":"1024x1024","background":"transparent"}]})),
+                Step { method: "GET", path: "/out.png", status: 200, body: fixture() },
+            ]
+        });
+        let mut request = request();
+        request.model = "seedream-5.5".into();
+        request.background = "transparent".into();
+        request.ratio = "1:1".into();
+        let (events, _) = mpsc::channel();
+        assert_eq!(backend.generate(&request, &keys(), &events).expect("Seedream 5.5 mock").len(), 1);
+        server.join().expect("mock server");
+        let body: Value = serde_json::from_slice(&audit.recv().expect("BytePlus request").body).expect("BytePlus JSON");
+        assert_eq!(body["model"], json!(BYTEPLUS_MODEL));
+        assert_eq!(body["size"], json!("1024x1024"));
+        assert_eq!(body["background"], json!("transparent"));
+        assert_eq!(body["watermark"], json!(false));
+        assert!(body.get("layer_decomposition").is_none());
+    }
+
+    #[test]
+    fn an_unactivated_seedream_model_explains_the_console_step() {
+        let message = provider_error("BytePlus", 404, &json!({"error":{"code":"ModelNotOpen","message":"Your account has not activated the model"}}), "k");
+        assert!(message.contains("Model activation") && message.contains("Seedream 5.5"), "{message}");
     }
 
     #[test]
@@ -1253,7 +1210,7 @@ mod tests {
         assert!(!error.contains("test-only-secret"));
         assert!(error.contains("authentication failed"));
         let masked = provider_error(
-            "OpenAI",
+            "Replicate",
             400,
             &json!({"error":{"message":"Incorrect API key provided: sk-proj-123********abcd; Authorization: Bearer masked-token"}}),
             "sk-proj-1234567890abcd",

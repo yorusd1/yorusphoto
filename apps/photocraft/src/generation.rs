@@ -5,6 +5,7 @@
 use photocraft_ui_egui::{
     AgentCommand, CodexChatRequest, CodexEvent, CodexLoginEvent, CodexWorkspaceAction, CodexWorkspaceEvent, CodexWorkspaceRequest, ImageGenerationRequest,
 };
+use base64::Engine as _;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -26,8 +27,13 @@ const TOOL_TIMEOUT: Duration = TURN_TIMEOUT;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const IMAGE_INSTRUCTIONS: &str = "You are the image-generation worker inside yorusphoto. Use the built-in image_gen.imagegen tool exactly once for this request. Use all reference images attached to this turn, with the num_last_images_to_include count specified in the turn. Omit referenced_image_paths: attached images are already available in this conversation, so the image tool must not reread local files. If no image is attached, omit both reference selectors and generate a new image from the prompt. The user's requested size and quality are preferences: the Codex image tool currently chooses both automatically. Do not claim they were enforced. Do not execute commands, use other services, write code, or synthesize a replacement image using code. Return a concise completion message after the image tool completes. If image generation is unavailable, report that explicitly.";
-const CHAT_INSTRUCTIONS: &str = "You are Codex embedded in the yorusphoto image editor. Help the user accomplish their request autonomously in the live document. First use yorusphoto_commands to inspect the available editor commands and current document. Drive editing through yorusphoto_execute, with exact documented command IDs and validated parameters. Every edit is an undoable editor command. For document file I/O, use the app.open and app.save methods listed under fileTools with paths relative to the authorized workspace; if that authority is unavailable, stop and explain it. Do not use filesystem or shell tools to manipulate the user's document. Stop editing when the user cancels the task. Use external apps or send messages only when the user explicitly asks. Use built-in image_gen.imagegen for requested image generation or image editing; returned images are delivered to the editor automatically, using the user's chosen selected-area or new-canvas destination. Request image dimensions and quality in the prompt as preferences; Codex currently chooses them automatically. Do not claim generation succeeded until the tool succeeds. Ask before destructive actions beyond the user's request.";
+const IMAGE_INSTRUCTIONS: &str = "You are the image-generation worker inside yorusphoto. Use the built-in image_gen.imagegen tool exactly once for this request (when a GIF request fails, once more for the still flipbook sheet the turn describes). Use all reference images attached to this turn, with the num_last_images_to_include count specified in the turn. Omit referenced_image_paths: attached images are already available in this conversation, so the image tool must not reread local files. If no image is attached, omit both reference selectors and generate a new image from the prompt. The user's requested size and quality are preferences: the Codex image tool currently chooses both automatically. Do not claim they were enforced. When the turn asks for an animation, pass gif with the requested frame_count to image_gen.imagegen; its frames become the layers of a flipbook, so keep the subject, framing and canvas the same in every frame. When the turn asks for a transparent background, pass transparent_background: true. Do not execute commands, use other services, write code, or synthesize a replacement image using code. Return a concise completion message after the image tool completes. If image generation is unavailable, report that explicitly.";
+const CHAT_INSTRUCTIONS: &str = "You are Codex embedded in the yorusphoto image editor. Help the user accomplish their request autonomously in the live document. First use yorusphoto_commands to inspect the available editor commands and current document. Drive editing through yorusphoto_execute, with exact documented command IDs and validated parameters. Every edit is an undoable editor command. For document file I/O, use the app.open and app.save methods listed under fileTools with paths relative to the authorized workspace; if that authority is unavailable, stop and explain it. Do not use filesystem or shell tools to manipulate the user's document. Stop editing when the user cancels the task. Use external apps or send messages only when the user explicitly asks. Use built-in image_gen.imagegen for requested image generation or image editing; returned images are delivered to the editor automatically, using the user's chosen selected-area or new-canvas destination. Request image dimensions and quality in the prompt as preferences; Codex currently chooses them automatically. Do not claim generation succeeded until the tool succeeds. For a sprite, icon, cutout or effect texture with no background, pass transparent_background: true to image_gen.imagegen. Ask before destructive actions beyond the user's request.";
+/// Added to the chat instructions while the user has GIF output switched on.
+const CHAT_ANIMATION_INSTRUCTIONS: &str = " GIF output is on: for an animation, flipbook or sprite animation the user asks for, pass gif with a frame_count of 2 to 16 to image_gen.imagegen. The editor places each frame as its own layer, so keep the subject, framing and canvas the same in every frame.";
+/// Codex's switch for GIF output from its image tool (0.169 and later; older runtimes ignore it
+/// with a warning and return still images).
+const ANIMATION_FEATURE: &str = "features.image_generation_animation=true";
 const ATTACHED_REFERENCE_INSTRUCTIONS: &str = "\nThe image attached to this turn is a reference image. For image editing, pass num_last_images_to_include: 1 to image_gen.imagegen and omit referenced_image_paths. Use the attached conversation image directly; do not look for or reread its local file.";
 
 /// Runs one subscription-backed image turn on a worker thread.
@@ -92,9 +98,13 @@ fn generate(request: ImageGenerationRequest) -> Result<Vec<u8>, String> {
     if request.quality.len() > 64 || request.size.len() > 64 {
         return Err("Image quality or size preference is too long.".into());
     }
+    if request.animation.is_some_and(|frames| !(2..=16).contains(&frames)) {
+        return Err("An animation has 2 to 16 frames.".into());
+    }
     let workspace = TemporaryWorkspace::new()?;
     let references = workspace.image_references(request.reference.as_deref(), &request.references)?;
-    let mut server = AppServer::start(&request.codex_path, &workspace.0, Some(request.cancel.clone()))?;
+    let settings: &[&str] = if request.animation.is_some() { &[ANIMATION_FEATURE] } else { &[] };
+    let mut server = AppServer::start_with(&request.codex_path, &workspace.0, Some(request.cancel.clone()), settings)?;
     server.require_chatgpt()?;
     let capability = server.rpc("modelProvider/capabilities/read", json!({}))?;
     if capability.get("imageGeneration").and_then(Value::as_bool) != Some(true) {
@@ -109,12 +119,23 @@ fn generate(request: ImageGenerationRequest) -> Result<Vec<u8>, String> {
     } else {
         ""
     };
+    let mut options = String::new();
+    if let Some(frames) = request.animation {
+        let (columns, rows) = photocraft_ui_egui::flipbook_grid(frames);
+        let spare = if columns * rows > frames { ", leaving the spare cells empty" } else { "" };
+        options.push_str(&format!(
+            " Make it a looping animation: pass gif: {{\"frame_count\": {frames}}} to image_gen.imagegen. Each frame becomes a layer of a flipbook, so keep the subject, framing and canvas the same in every frame and change only the motion. If the GIF request fails, call image_gen.imagegen once more without gif and draw the {frames} frames as one image instead: a {columns} x {rows} grid of equal cells in reading order (left to right, then top to bottom), with no gaps, borders, numbers or labels{spare}."
+        ));
+    }
+    if request.transparent {
+        options.push_str(" Pass transparent_background: true: the result is a cutout with no background.");
+    }
     let prompt = format!(
-        "Generate one image. Preferred rendering quality: {}. Preferred output dimensions: {}. These are image-tool prompt preferences. {}\nUser request:\n{}",
+        "Generate one image. Preferred rendering quality: {}. Preferred output dimensions: {}. These are image-tool prompt preferences.{options} {}\nUser request:\n{}",
         request.quality, request.size, reference_roles, request.prompt
     );
     let turn_id = server.start_turn(&thread.id, &prompt, &references, &thread)?;
-    let images = server.run_turn(&thread.id, &turn_id, &request.cancel, None, None)?;
+    let images = server.run_turn(&thread.id, &turn_id, &request.cancel, None, None, None)?;
     if request.cancel.load(Ordering::Relaxed) {
         return Err("Cancelled.".into());
     }
@@ -128,19 +149,25 @@ fn chat_turn(request: CodexChatRequest, events: &mpsc::Sender<CodexEvent>, comma
     validate_prompt(&request.prompt)?;
     let workspace = TemporaryWorkspace::persistent()?;
     let reference = workspace.reference(request.reference.as_deref())?;
-    let mut server = AppServer::start(&request.codex_path, &workspace.0, Some(request.cancel.clone()))?;
+    let settings: &[&str] = if request.animation { &[ANIMATION_FEATURE] } else { &[] };
+    let mut server = AppServer::start_with(&request.codex_path, &workspace.0, Some(request.cancel.clone()), settings)?;
     server.require_chatgpt()?;
     let selection = workspace::ModelSelection { model: request.model, effort: request.reasoning_effort, requires_image: reference.is_some() };
     if let Some(thread_id) = &request.thread_id {
         workspace::verify_thread(&mut server, thread_id, &workspace.0)?;
     }
-    let thread = server.start_thread(request.thread_id.as_deref(), &workspace.0, CHAT_INSTRUCTIONS, true, &selection)?;
+    let instructions = if request.animation { format!("{CHAT_INSTRUCTIONS}{CHAT_ANIMATION_INSTRUCTIONS}") } else { CHAT_INSTRUCTIONS.to_owned() };
+    let thread = server.start_thread(request.thread_id.as_deref(), &workspace.0, &instructions, true, &selection)?;
     let _ = events.send(CodexEvent::Started(thread.id.clone()));
     let _ = events.send(CodexEvent::Telemetry { kind: "model".into(), data: json!({"model":thread.model,"reasoningEffort":thread.effort}) });
     let references: Vec<_> = reference.into_iter().collect();
     let turn_id = server.start_turn(&thread.id, &request.prompt, &references, &thread)?;
-    let images = server.run_turn(&thread.id, &turn_id, &request.cancel, Some(events), Some(commands))?;
-    for bytes in images {
+    let images = server.run_turn(&thread.id, &turn_id, &request.cancel, Some(events), Some(commands), request.steer.as_ref());
+    // Messages typed as the turn ended never reached Codex: give them back.
+    while let Some(text) = request.steer.as_ref().and_then(|steer| steer.try_recv().ok()) {
+        let _ = events.send(CodexEvent::Unsent(text));
+    }
+    for bytes in images? {
         if request.cancel.load(Ordering::Relaxed) {
             return Err("Cancelled.".into());
         }
@@ -394,11 +421,16 @@ struct PendingEditorCall {
 
 impl AppServer {
     fn start(codex_path: &str, workspace: &Path, cancel: Option<Arc<AtomicBool>>) -> Result<Self, String> {
+        Self::start_with(codex_path, workspace, cancel, &[])
+    }
+
+    /// Start Codex with `settings`, extra `-c` config overrides for this request.
+    fn start_with(codex_path: &str, workspace: &Path, cancel: Option<Arc<AtomicBool>>, settings: &[&str]) -> Result<Self, String> {
         let binary = resolve_codex(codex_path)?;
         let mut command = Command::new(&binary);
         command.args(["app-server", "--listen", "stdio://", "--enable", "image_generation"]);
-        for setting in ["model_provider=\"openai\"", "features.shell_tool=false", "features.hooks=false"] {
-            command.args(["-c", setting]);
+        for setting in ["model_provider=\"openai\"", "features.shell_tool=false", "features.hooks=false"].iter().chain(settings) {
+            command.args(["-c", *setting]);
         }
         command.current_dir(workspace).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         // The subscription bridge must never silently switch to API billing from inherited env.
@@ -591,11 +623,16 @@ impl AppServer {
         cancel: &AtomicBool,
         events: Option<&mpsc::Sender<CodexEvent>>,
         commands: Option<&mpsc::Sender<AgentCommand>>,
+        steer: Option<&mpsc::Receiver<String>>,
     ) -> Result<Vec<Vec<u8>>, String> {
         let deadline = Instant::now() + TURN_TIMEOUT;
         let mut images = Vec::new();
         let mut assistant_text = String::new();
         let mut editor_calls: VecDeque<PendingEditorCall> = VecDeque::new();
+        let mut transcript = Transcript::default();
+        let mut steering: Vec<(u64, String)> = Vec::new();
+        // A failed image call: Codex may explain or retry it, so the turn goes on.
+        let mut image_error: Option<String> = None;
         loop {
             if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 let cancelled = cancel.load(Ordering::Relaxed);
@@ -620,6 +657,8 @@ impl AppServer {
             if cancel.load(Ordering::Relaxed) {
                 continue;
             }
+            // A message sent while the task runs joins this turn, as typing in Codex does.
+            self.send_steering(steer, thread_id, turn_id, &mut steering)?;
             let message = if let Some(message) = self.pending.pop_front() {
                 self.pending_bytes = self.pending_bytes.saturating_sub(message.to_string().len());
                 message
@@ -630,6 +669,10 @@ impl AppServer {
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Err("The Codex process exited before completing the request.".into()),
                 }
             };
+            if message.get("method").is_none() {
+                steering_reply(&message, &mut steering, events);
+                continue;
+            }
             let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
             let params = message.get("params").unwrap_or(&Value::Null);
             if let Some(events) = events
@@ -656,39 +699,50 @@ impl AppServer {
                 }
                 "item/agentMessage/delta" => {
                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
-                        if assistant_text.len().saturating_add(delta.len()) <= 8192 {
-                            assistant_text.push_str(delta);
+                        // Each agent message is its own paragraph, as Codex shows them.
+                        let text = transcript.delta(params.get("itemId").and_then(Value::as_str), delta);
+                        if assistant_text.len().saturating_add(text.len()) <= 8192 {
+                            assistant_text.push_str(&text);
                         }
                         if let Some(events) = events {
-                            let _ = events.send(CodexEvent::Text(delta.into()));
+                            let _ = events.send(CodexEvent::Text(text));
                         }
                     }
                 }
-                "item/started" => {
-                    if params.pointer("/item/type").and_then(Value::as_str) == Some("imageGeneration")
-                        && let Some(events) = events
+                "item/reasoning/summaryTextDelta" | "turn/plan/updated" | "warning" | "item/started" => {
+                    if let Some(events) = events
+                        && let Some(status) = progress_status(method, params, &mut transcript)
                     {
-                        let _ = events.send(CodexEvent::Status("Generating image…".into()));
+                        let _ = events.send(CodexEvent::Status(status));
                     }
                 }
                 "item/completed" => {
                     if let Some(item) = params.get("item") {
                         if item.get("type").and_then(Value::as_str) == Some("agentMessage")
-                            && assistant_text.is_empty()
                             && let Some(text) = item.get("text").and_then(Value::as_str)
+                            && let Some(text) = transcript.completed(item.get("id").and_then(Value::as_str), text)
                         {
-                            if text.len() <= 8192 {
-                                assistant_text.push_str(text);
+                            if assistant_text.len().saturating_add(text.len()) <= 8192 {
+                                assistant_text.push_str(&text);
                             }
                             if let Some(events) = events {
-                                let _ = events.send(CodexEvent::Text(text.into()));
+                                let _ = events.send(CodexEvent::Text(text));
                             }
                         }
                         if item.get("type").and_then(Value::as_str) == Some("imageGeneration") {
                             if images.len() >= 5 {
                                 return Err("Codex returned more than five images in one turn.".into());
                             }
-                            images.push(read_generated_image(item, &self.image_root, &self.workspace)?);
+                            match read_generated_image(item, &self.image_root, &self.workspace) {
+                                Ok(bytes) => images.push(bytes),
+                                Err(error) => {
+                                    // In a chat the note stays in the transcript, as its own paragraph.
+                                    if let Some(events) = events {
+                                        let _ = events.send(CodexEvent::Text(transcript.delta(item.get("id").and_then(Value::as_str), &error)));
+                                    }
+                                    image_error = Some(error);
+                                }
+                            }
                         }
                     }
                 }
@@ -699,7 +753,9 @@ impl AppServer {
                     }
                     return match turn.get("status").and_then(Value::as_str) {
                         Some("completed") if images.is_empty() && events.is_none() => {
-                            Err(format!("Codex completed without generating an image. {}", assistant_text.trim()))
+                            let reason = image_error.as_deref().unwrap_or("Codex completed without generating an image.");
+                            let said = assistant_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            Err(format!("{reason} {said}").trim_end().to_owned())
                         }
                         Some("completed") => Ok(images),
                         Some("interrupted") => Err("Cancelled.".into()),
@@ -710,10 +766,27 @@ impl AppServer {
                     if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
                         return Err(params.pointer("/error/message").and_then(Value::as_str).unwrap_or("Codex reported an error.").into());
                     }
+                    if let Some(events) = events {
+                        let _ = events.send(CodexEvent::Status("Reconnecting to Codex…".into()));
+                    }
                 }
                 _ => self.reject_other_request(&message)?,
             }
         }
+    }
+
+    /// Send the messages typed while the turn runs as Codex's `turn/steer` (at most 16 unanswered).
+    fn send_steering(&mut self, steer: Option<&mpsc::Receiver<String>>, thread_id: &str, turn_id: &str, steering: &mut Vec<(u64, String)>) -> Result<(), String> {
+        while let Some(text) = steer.and_then(|steer| steer.try_recv().ok()) {
+            if text.trim().is_empty() || text.len() > MAX_PROMPT_BYTES || steering.len() >= 16 {
+                continue;
+            }
+            let id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            self.send(&json!({"id":id,"method":"turn/steer","params":{"threadId":thread_id,"expectedTurnId":turn_id,"input":[{"type":"text","text":text}]}}))?;
+            steering.push((id, text));
+        }
+        Ok(())
     }
 
     fn reject_other_request(&mut self, message: &Value) -> Result<(), String> {
@@ -841,9 +914,21 @@ fn read_message(reader: &mut impl BufRead) -> Result<Value, String> {
 
 fn read_generated_image(item: &Value, image_root: &Path, workspace: &Path) -> Result<Vec<u8>, String> {
     if item.get("status").and_then(Value::as_str) != Some("completed") {
-        return Err("Codex image generation failed. Check your subscription usage limits and try again.".into());
+        return Err(image_failure(item, SystemTime::now()));
     }
-    let path = item.get("savedPath").and_then(Value::as_str).ok_or("Codex did not save its generated image. Update Codex and retry.")?;
+    let Some(path) = item.get("savedPath").and_then(Value::as_str) else {
+        // Without a saved file the image may still come inline.
+        let inline = item.get("result").and_then(Value::as_str).map(str::trim).filter(|result| !result.is_empty());
+        let Some(result) = inline else {
+            return Err("Codex did not save its generated image. Update Codex and retry.".into());
+        };
+        if result.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+            return Err("The generated image exceeds the 32 MiB file limit.".into());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(result).map_err(|_| "Codex returned an unreadable generated image.".to_owned())?;
+        validate_generated(&bytes)?;
+        return Ok(bytes);
+    };
     let path = Path::new(path);
     if !path.is_absolute() {
         return Err("Codex returned a non-absolute generated-image path.".into());
@@ -860,8 +945,152 @@ fn read_generated_image(item: &Value, image_root: &Path, workspace: &Path) -> Re
     }
     let mut bytes = Vec::new();
     file.take((MAX_IMAGE_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(|error| format!("Could not read the generated image: {error}"))?;
-    validate_png(&bytes)?;
+    validate_generated(&bytes)?;
     Ok(bytes)
+}
+
+/// A reply to a steering message: only a refusal needs saying, and its text goes back to the
+/// composer.
+fn steering_reply(message: &Value, steering: &mut Vec<(u64, String)>, events: Option<&mpsc::Sender<CodexEvent>>) {
+    let Some(id) = message.get("id").and_then(Value::as_u64) else { return };
+    let Some(index) = steering.iter().position(|(pending, _)| *pending == id) else { return };
+    let (_, text) = steering.swap_remove(index);
+    if message.get("error").is_some()
+        && let Some(events) = events
+    {
+        let _ = events.send(CodexEvent::Unsent(text));
+    }
+}
+
+/// Why an image generation failed, in words: a ChatGPT plan's image limit says when it resets.
+fn image_failure(item: &Value, now: SystemTime) -> String {
+    if item.pointer("/failure/type").and_then(Value::as_str) != Some("usageLimitExceeded") {
+        return "Codex image generation failed.".into();
+    }
+    let now = now.duration_since(UNIX_EPOCH).map_or(0, |time| time.as_secs()) as i64;
+    match item.pointer("/failure/resetsAt").and_then(Value::as_i64).map(|at| at - now) {
+        Some(seconds) if seconds > 0 => {
+            let minutes = (seconds + 59) / 60;
+            let wait = match (minutes / 60, minutes % 60) {
+                (0, m) => format!("{m} min"),
+                (h, 0) => format!("{h} h"),
+                (h, m) => format!("{h} h {m} min"),
+            };
+            format!("You reached your ChatGPT plan's image generation limit. It resets in {wait}.")
+        }
+        _ => "You reached your ChatGPT plan's image generation limit. Try again later.".into(),
+    }
+}
+
+/// A generated image: a PNG, or a GIF for an animation, under 32 MiB.
+fn validate_generated(bytes: &[u8]) -> Result<(), String> {
+    let png = bytes.get(..8) == Some(b"\x89PNG\r\n\x1a\n");
+    let gif = matches!(bytes.get(..6), Some(b"GIF87a" | b"GIF89a"));
+    if bytes.len() > MAX_IMAGE_BYTES || !(png || gif) {
+        return Err("The generated image must be a PNG or GIF smaller than 32 MiB.".into());
+    }
+    Ok(())
+}
+
+/// The status line for a progress notification: the heading of what Codex is thinking about, its
+/// plan, a warning, or the kind of work it started.
+fn progress_status(method: &str, params: &Value, transcript: &mut Transcript) -> Option<String> {
+    match method {
+        "item/reasoning/summaryTextDelta" => {
+            let item = params.get("itemId").and_then(Value::as_str)?;
+            let delta = params.get("delta").and_then(Value::as_str)?;
+            transcript.thinking(item, params.get("summaryIndex").and_then(Value::as_i64).unwrap_or(0), delta)
+        }
+        "turn/plan/updated" => plan_status(params),
+        "warning" => params.get("message").and_then(Value::as_str).map(|warning| warning.chars().take(240).collect()),
+        "item/started" => match params.pointer("/item/type").and_then(Value::as_str)? {
+            "imageGeneration" => Some("Generating image…".into()),
+            "reasoning" => Some("Thinking…".into()),
+            "webSearch" => Some("Searching the web…".into()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a plan update says in the status line: steps done, then the step in progress.
+fn plan_status(params: &Value) -> Option<String> {
+    let plan = params.get("plan")?.as_array()?;
+    if plan.is_empty() {
+        return None;
+    }
+    let status = |step: &Value| step.get("status").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let done = plan.iter().filter(|step| status(step) == "completed").count();
+    let mut text = format!("Plan {done}/{}", plan.len());
+    let current = plan.iter().find(|step| status(step) == "inProgress").or_else(|| plan.iter().find(|step| status(step) == "pending"));
+    if let Some(step) = current.and_then(|step| step.get("step")).and_then(Value::as_str) {
+        text.push_str(": ");
+        text.extend(step.chars().take(100));
+    }
+    Some(text)
+}
+
+/// A turn's agent messages as the chat shows them: each one its own paragraph, and the heading of
+/// what Codex is reasoning about for the status line.
+#[derive(Default)]
+struct Transcript {
+    /// Agent messages that streamed deltas, so their completed text isn't shown twice.
+    streamed: Vec<String>,
+    /// The agent message the last text belonged to.
+    last_item: Option<String>,
+    /// Some text was shown in this turn.
+    any: bool,
+    /// The reasoning summary part being read: its item, part and text so far.
+    reasoning: Option<(String, i64, String)>,
+    /// The last heading shown.
+    title: Option<String>,
+}
+
+impl Transcript {
+    /// The text to show for a delta of agent message `item`: a new message starts a paragraph.
+    fn delta(&mut self, item: Option<&str>, delta: &str) -> String {
+        let mut text = String::new();
+        if let Some(item) = item {
+            if self.any && self.last_item.as_deref() != Some(item) {
+                text.push_str("\n\n");
+            }
+            if !self.streamed.iter().any(|seen| seen == item) && self.streamed.len() < 512 {
+                self.streamed.push(item.into());
+            }
+            self.last_item = Some(item.into());
+        }
+        text.push_str(delta);
+        self.any |= !delta.is_empty();
+        text
+    }
+
+    /// The text to show when agent message `item` completes: all of it, unless it streamed.
+    fn completed(&mut self, item: Option<&str>, full: &str) -> Option<String> {
+        if full.is_empty() || item.is_some_and(|id| self.streamed.iter().any(|seen| seen == id)) {
+            return None;
+        }
+        Some(self.delta(item, full))
+    }
+
+    /// "Thinking: <heading>" when a reasoning summary part's bold heading is complete and new.
+    fn thinking(&mut self, item: &str, part: i64, delta: &str) -> Option<String> {
+        match &mut self.reasoning {
+            Some((id, index, text)) if id == item && *index == part => {
+                if text.len() < 4096 {
+                    text.push_str(delta);
+                }
+            }
+            _ => self.reasoning = Some((item.into(), part, delta.into())),
+        }
+        let text = &self.reasoning.as_ref()?.2;
+        let (title, _) = text.trim_start().strip_prefix("**")?.split_once("**")?;
+        let title = title.trim();
+        if title.is_empty() || title.len() > 120 || self.title.as_deref() == Some(title) {
+            return None;
+        }
+        self.title = Some(title.to_owned());
+        Some(format!("Thinking: {title}"))
+    }
 }
 
 fn validate_png(bytes: &[u8]) -> Result<(), String> {
@@ -1201,6 +1430,92 @@ mod tests {
         let item = json!({"status":"completed","savedPath":path});
         assert!(read_generated_image(&item, &workspace.0, &workspace.0).is_err());
         assert!(read_generated_image(&json!({"status":"completed","savedPath":"relative.png"}), &workspace.0, &workspace.0).is_err());
+    }
+
+    #[test]
+    fn generated_gifs_and_inline_results_are_read_and_other_files_refused() {
+        let workspace = TemporaryWorkspace::new().expect("temporary workspace");
+        let gif = workspace.0.join("generated_images").join("animation.gif");
+        fs::create_dir_all(gif.parent().unwrap()).unwrap();
+        fs::write(&gif, b"GIF89a\x01\x00\x01\x00").unwrap();
+        let bytes = read_generated_image(&json!({"status":"completed","savedPath":gif}), &workspace.0, &workspace.0).expect("a saved GIF");
+        assert!(bytes.starts_with(b"GIF89a"));
+        let text = workspace.0.join("generated_images").join("notes.txt");
+        fs::write(&text, b"hello").unwrap();
+        assert!(read_generated_image(&json!({"status":"completed","savedPath":text}), &workspace.0, &workspace.0).is_err());
+        let inline = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nrest");
+        let bytes = read_generated_image(&json!({"status":"completed","result":inline}), &workspace.0, &workspace.0).expect("an inline PNG");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        let not_image = base64::engine::general_purpose::STANDARD.encode(b"plain text");
+        assert!(read_generated_image(&json!({"status":"completed","result":not_image}), &workspace.0, &workspace.0).is_err());
+        assert!(read_generated_image(&json!({"status":"completed","fileId":"file-1"}), &workspace.0, &workspace.0).is_err());
+    }
+
+    #[test]
+    fn an_image_limit_failure_says_when_it_resets() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let item = |resets: Value| json!({"status":"failed","failure":{"type":"usageLimitExceeded","limitId":"image_gen","resetsAt":resets}});
+        assert!(image_failure(&item(json!(1_000_000 + 25 * 60)), now).ends_with("It resets in 25 min."));
+        assert!(image_failure(&item(json!(1_000_000 + 2 * 3600 + 5 * 60)), now).ends_with("It resets in 2 h 5 min."));
+        assert!(image_failure(&item(json!(1_000_000 + 3 * 3600)), now).ends_with("It resets in 3 h."));
+        assert!(image_failure(&item(Value::Null), now).ends_with("Try again later."));
+        assert!(image_failure(&json!({"status":"failed"}), now).starts_with("Codex image generation failed"));
+    }
+
+    #[test]
+    fn agent_messages_are_separate_paragraphs_and_streamed_text_is_not_repeated() {
+        let mut transcript = Transcript::default();
+        assert_eq!(transcript.delta(Some("m1"), "First"), "First");
+        assert_eq!(transcript.delta(Some("m1"), " note."), " note.");
+        assert_eq!(transcript.completed(Some("m1"), "First note."), None, "a streamed message is not sent twice");
+        assert_eq!(transcript.delta(Some("m2"), "Second"), "\n\nSecond");
+        assert_eq!(transcript.completed(Some("m3"), "Third, whole."), Some("\n\nThird, whole.".into()));
+        assert_eq!(transcript.completed(Some("m4"), ""), None);
+        let mut fresh = Transcript::default();
+        assert_eq!(fresh.completed(Some("only"), "Only one."), Some("Only one.".into()), "the first message has no break before it");
+    }
+
+    #[test]
+    fn reasoning_summaries_show_their_heading_once() {
+        let mut transcript = Transcript::default();
+        assert_eq!(transcript.thinking("r1", 0, "**Planning the"), None);
+        assert_eq!(transcript.thinking("r1", 0, " layers**\n\nI will"), Some("Thinking: Planning the layers".into()));
+        assert_eq!(transcript.thinking("r1", 0, " split the sprite."), None);
+        assert_eq!(transcript.thinking("r1", 1, "**Checking colours**"), Some("Thinking: Checking colours".into()));
+        assert_eq!(transcript.thinking("r2", 0, "No heading here"), None);
+    }
+
+    #[test]
+    fn a_refused_steering_message_goes_back_to_the_composer() {
+        let (events, received) = mpsc::channel();
+        let mut steering = vec![(7, "Make it blue".to_owned()), (8, "And bigger".to_owned())];
+        steering_reply(&json!({"id":7,"result":{"turnId":"t"}}), &mut steering, Some(&events));
+        assert!(received.try_recv().is_err(), "an accepted message stays in the turn");
+        steering_reply(&json!({"id":8,"error":{"message":"no active turn"}}), &mut steering, Some(&events));
+        assert!(matches!(received.try_recv(), Ok(CodexEvent::Unsent(text)) if text == "And bigger"));
+        assert!(steering.is_empty());
+        steering_reply(&json!({"id":99,"error":{}}), &mut steering, Some(&events));
+        assert!(received.try_recv().is_err(), "a reply to something else is not a steering reply");
+    }
+
+    #[test]
+    fn progress_notifications_name_the_work_in_the_status_line() {
+        let mut transcript = Transcript::default();
+        let started = |kind: &str| json!({"item":{"type":kind,"id":"i"}});
+        assert_eq!(progress_status("item/started", &started("webSearch"), &mut transcript).as_deref(), Some("Searching the web…"));
+        assert_eq!(progress_status("item/started", &started("agentMessage"), &mut transcript), None);
+        assert_eq!(progress_status("warning", &json!({"message":"Model is busy"}), &mut transcript).as_deref(), Some("Model is busy"));
+        let delta = json!({"itemId":"r","delta":"**Choosing colours**","summaryIndex":0});
+        assert_eq!(progress_status("item/reasoning/summaryTextDelta", &delta, &mut transcript).as_deref(), Some("Thinking: Choosing colours"));
+        assert_eq!(progress_status("turn/started", &json!({}), &mut transcript), None);
+    }
+
+    #[test]
+    fn plan_updates_count_done_steps_and_name_the_current_one() {
+        let params = json!({"plan":[{"step":"Inspect the canvas","status":"completed"},{"step":"Cut out the sprite","status":"inProgress"},{"step":"Save","status":"pending"}]});
+        assert_eq!(plan_status(&params).as_deref(), Some("Plan 1/3: Cut out the sprite"));
+        assert_eq!(plan_status(&json!({"plan":[]})), None);
+        assert_eq!(plan_status(&json!({"plan":[{"step":"Done","status":"completed"}]})).as_deref(), Some("Plan 1/1"));
     }
 
     #[test]

@@ -33,29 +33,35 @@ New-Item -ItemType Directory -Path $workspacePath -Force | Out-Null
 
 # The engine creates its token atomically. Protect its parent before creation on Windows,
 # where the Rust host does not set Unix-style file permissions. Never read or print the token.
+# Only the access rules change: the folder already belongs to you, and setting an owner needs a
+# privilege many accounts (and scripted shells) don't hold. A failure warns instead of stopping
+# the launch.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$privateDirectoryAcl = [Security.AccessControl.DirectorySecurity]::new()
-$privateDirectoryAcl.SetOwner($identity.User)
-$privateDirectoryAcl.SetAccessRuleProtection($true, $false)
-$directoryRule = [Security.AccessControl.FileSystemAccessRule]::new(
-    $identity.User,
-    [Security.AccessControl.FileSystemRights]::FullControl,
-    ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),
-    [Security.AccessControl.PropagationFlags]::None,
-    [Security.AccessControl.AccessControlType]::Allow
-)
-$privateDirectoryAcl.AddAccessRule($directoryRule)
-Set-Acl -LiteralPath $dataPath -AclObject $privateDirectoryAcl
+function Protect-Private([string] $Path, [bool] $IsDirectory) {
+    try {
+        if ($IsDirectory) {
+            $acl = [Security.AccessControl.DirectorySecurity]::new()
+            $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        } else {
+            $acl = [Security.AccessControl.FileSecurity]::new()
+            $inherit = [Security.AccessControl.InheritanceFlags]::None
+        }
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $identity.User,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        (Get-Item -LiteralPath $Path -Force).SetAccessControl($acl)
+    } catch {
+        Write-Warning "Could not limit $Path to your account ($($_.Exception.Message)). Keep that folder private: it holds the control token."
+    }
+}
+Protect-Private $dataPath $true
 if (Test-Path -LiteralPath $tokenPath -PathType Leaf) {
-    $privateFileAcl = [Security.AccessControl.FileSecurity]::new()
-    $privateFileAcl.SetOwner($identity.User)
-    $privateFileAcl.SetAccessRuleProtection($true, $false)
-    $privateFileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $identity.User,
-        [Security.AccessControl.FileSystemRights]::FullControl,
-        [Security.AccessControl.AccessControlType]::Allow
-    ))
-    Set-Acl -LiteralPath $tokenPath -AclObject $privateFileAcl
+    Protect-Private $tokenPath $false
 }
 
 # Config contains only the private token FILE PATH, never the credential itself. Regenerate

@@ -1,12 +1,35 @@
-//! Browser navigation for explicit links, such as original contributor credits.
-//! Product help is local: this build has no configured product website or community URL.
+//! Browser links: the Help menu's project pages and the start screen's links. yorusphoto links to
+//! its own repository and community; PhotoCraft, the open-source editor it is forked from, keeps a
+//! link of its own (Help › PhotoCraft (upstream) on GitHub).
 
 use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
 
-/// Open an explicit URL through the platform service, falling back to egui's browser request.
-/// This helper is also used by the legal contributor credits; it supplies no product URLs.
+/// The yorusphoto repository: source, releases and the guide.
+pub const GITHUB: &str = "https://github.com/yorusd1/yorusphoto";
+pub const ISSUES: &str = "https://github.com/yorusd1/yorusphoto/issues";
+/// The project page the start screen's Website link and Help › yorusphoto Website open.
+pub const APP_PAGE: &str = "https://github.com/yorusd1/yorusphoto#readme";
+/// How to set up Codex, YorusAi Direct and the MCP bridge.
+pub const TUTORIALS: &str = "https://github.com/yorusd1/yorusphoto/blob/main/docs/yorusphoto.md";
+/// The YorusDevs community, where yorusphoto's AI workflows are shared.
+pub const DISCORD: &str = "https://discord.gg/P9zKXJdWpj";
+/// PhotoCraft, the project yorusphoto is forked from.
+pub const UPSTREAM: &str = "https://github.com/storytold/photocraft";
+/// Upstream's id for its sibling site; yorusphoto uses the slot for the upstream project itself.
+pub const ARTCRAFT_WEBSITE: &str = UPSTREAM;
+
+/// Help-menu link commands: (id, url). Labels live in the engine's shell command table.
+pub const COMMANDS: &[(&str, &str)] =
+    &[("help.discord", DISCORD), ("help.website", APP_PAGE), ("help.artcraftWebsite", UPSTREAM), ("help.github", GITHUB), ("help.reportIssue", ISSUES)];
+
+pub fn url_for(id: &str) -> Option<&'static str> {
+    COMMANDS.iter().find(|c| c.0 == id).map(|c| c.1)
+}
+
+/// Open `url` in the system browser (a new tab on the web) and note it in the status bar. Prefers
+/// the platform `open_url` service (reliable on Windows/macOS/Linux); falls back to `ctx.open_url`.
 pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context, url: &str) -> Value {
     let opened = app.services.open_url.as_ref().map(|f| f(url).is_ok()).unwrap_or(false);
     if !opened {
@@ -22,8 +45,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    #[test]
-    fn explicit_credit_links_open_through_the_platform_service() {
+    fn recording_app() -> (PhotocraftApp, Arc<Mutex<Vec<String>>>) {
         let opened = Arc::new(Mutex::new(Vec::<String>::new()));
         let rec = opened.clone();
         let services = crate::Services {
@@ -33,39 +55,22 @@ mod tests {
             })),
             ..Default::default()
         };
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
-        let url = "https://example.org/licenses";
-        open(&mut app, &egui::Context::default(), url);
-        assert_eq!(*opened.lock().unwrap(), [url]);
-        assert_eq!(app.ui.status, format!("Opened {url}"));
+        (PhotocraftApp::new(photocraft_engine::Session::new(), services), opened)
     }
 
     #[test]
-    fn help_menu_contains_only_local_product_information() {
-        let app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-        let help: Vec<_> = crate::menus::menu_items(&app).into_iter().filter(|item| item.path == ["Help"]).map(|item| item.id).collect();
-        assert_eq!(help, ["help.systemInfo", "help.about"]);
-        assert!(crate::menus::is_enabled(&app, "help.about"));
-        assert!(crate::menus::is_enabled(&app, "help.systemInfo"));
-    }
-
-    #[test]
-    fn removed_community_commands_cannot_open_an_external_destination() {
-        let opened = Arc::new(Mutex::new(Vec::<String>::new()));
-        let rec = opened.clone();
-        let services = crate::Services {
-            open_url: Some(Box::new(move |url| {
-                rec.lock().unwrap().push(url.to_owned());
-                Ok(())
-            })),
-            ..Default::default()
-        };
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+    fn every_help_link_opens_the_fork_or_its_upstream_through_the_platform_service() {
+        let (mut app, opened) = recording_app();
         let ctx = egui::Context::default();
-        for id in ["help.discord", "help.website", "help.artcraftWebsite", "help.github", "help.reportIssue"] {
-            assert!(!crate::menus::is_live(id), "{id}");
-            assert!(crate::menus::invoke(&mut app, &ctx, id, json!({})).is_err(), "{id}");
+        for (id, url) in COMMANDS {
+            assert!(crate::menus::is_live(id) && crate::menus::is_enabled(&app, id), "{id}");
+            crate::menus::invoke(&mut app, &ctx, id, json!({})).unwrap();
+            assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(*url), "{id}");
+            assert!(url.contains("yorusphoto") || *url == UPSTREAM || *url == DISCORD, "{id}: {url}");
         }
-        assert!(opened.lock().unwrap().is_empty());
+        assert!(!COMMANDS.iter().any(|(_, url)| url.contains("artcraft")), "no upstream community promotion");
+        open(&mut app, &ctx, TUTORIALS);
+        assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(TUTORIALS));
+        assert_eq!(app.ui.status, format!("Opened {TUTORIALS}"));
     }
 }

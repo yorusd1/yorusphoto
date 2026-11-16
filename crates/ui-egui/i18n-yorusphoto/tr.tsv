@@ -1,0 +1,9 @@
+# yorusphoto's own interface labels: the assistant sidebar and its menus.
+# Upstream PhotoCraft text is translated by craft-i18n; add only fork-specific labels here.
+# Format: English label, a tab, the translation. Keep {placeholders} and a trailing … as written.
+Generate Image with Codex…	Codex ile görüntü oluştur…
+Flipbook	Flipbook
+Make Flipbook Sheet…	Flipbook Sayfası Oluştur…
+Split Flipbook Sheet…	Flipbook Sayfasını Böl…
+Make Flipbook Sheet	Flipbook Sayfası Oluştur
+Split Flipbook Sheet	Flipbook Sayfasını Böl

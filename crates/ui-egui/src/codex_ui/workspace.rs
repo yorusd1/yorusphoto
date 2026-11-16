@@ -33,10 +33,17 @@ pub struct TokenUsage {
 
 impl TokenUsage {
     /// Last-turn usage describes the current context; cumulative totals do not.
+    /// The share of the context window in use, reckoned as Codex does: the 12,000 tokens that are
+    /// always there (instructions and tools) count as neither used nor free.
     pub fn context_fraction(&self) -> Option<f32> {
+        const BASELINE: u64 = 12_000;
         let used = self.last.total_tokens?;
         let capacity = self.model_context_window.filter(|value| *value > 0)?;
-        Some((used as f64 / capacity as f64).clamp(0.0, 1.0) as f32)
+        if capacity <= BASELINE {
+            return Some(1.0);
+        }
+        let effective = capacity - BASELINE;
+        Some((used.saturating_sub(BASELINE).min(effective) as f64 / effective as f64) as f32)
     }
 
     pub fn valid(&self) -> bool {
@@ -600,7 +607,7 @@ pub fn model_ui(ui: &mut Ui, workspace: &Workspace, selected: &mut Option<String
                 .selected_model(selected.as_deref())
                 .map(|model| model.display_name.clone())
                 .unwrap_or_else(|| selected.clone().unwrap_or_else(|| "Codex default".into()));
-            egui::ComboBox::from_id_salt("codex-model")
+            craft_ui::ComboBox::from_id_salt("codex-model")
                 .width(165.0)
                 .selected_text(label)
                 .show_ui(ui, |ui| {
@@ -635,7 +642,7 @@ pub fn model_ui(ui: &mut Ui, workspace: &Workspace, selected: &mut Option<String
                     changed = true;
                 }
                 if !model.supported_reasoning_efforts.is_empty() {
-                    egui::ComboBox::from_id_salt("codex-reasoning").width(78.0).selected_text(reasoning.as_deref().unwrap_or("Default")).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt("codex-reasoning").width(78.0).selected_text(reasoning.as_deref().unwrap_or("Default")).show_ui(ui, |ui| {
                         changed |= ui.selectable_value(reasoning, None, "Default reasoning").changed();
                         for effort in &model.supported_reasoning_efforts {
                             changed |= ui.selectable_value(reasoning, Some(effort.id.clone()), &effort.id).on_hover_text(&effort.description).changed();
@@ -906,15 +913,17 @@ mod tests {
         let mut workspace = Workspace::default();
         workspace.apply_token_usage(&json!({"threadId":"test","tokenUsage":{"last":{"totalTokens":25000,"inputTokens":20000,"outputTokens":5000},"total":{"totalTokens":900000},"modelContextWindow":100000}}), 100).unwrap();
         let usage = workspace.token_usage.as_ref().unwrap();
-        assert_eq!(usage.context_fraction(), Some(0.25));
+        // 25,000 of 100,000, less Codex's 12,000-token baseline on both sides.
+        let quarter = Some((13_000.0 / 88_000.0) as f32);
+        assert_eq!(usage.context_fraction(), quarter);
         assert_eq!(usage.total.total_tokens, Some(900000));
         assert_eq!(usage.last.cached_input_tokens, None);
         assert!(workspace.apply_token_usage(&json!({"last":{"totalTokens":-1}}), 101).is_err());
-        assert_eq!(workspace.token_usage.as_ref().unwrap().context_fraction(), Some(0.25));
+        assert_eq!(workspace.token_usage.as_ref().unwrap().context_fraction(), quarter);
         assert!(workspace.apply_token_usage(&json!({"last":{"totalTokens":1},"modelContextWindow":0}), 101).is_err());
         workspace.apply_compaction(Compaction::Complete, 102);
         assert_eq!(workspace.tokens_observed_at_unix, None);
-        assert_eq!(workspace.token_usage.as_ref().unwrap().context_fraction(), Some(0.25));
+        assert_eq!(workspace.token_usage.as_ref().unwrap().context_fraction(), quarter);
         workspace.apply_token_usage(&json!({"last":{"totalTokens":1000},"modelContextWindow":100000}), 103).unwrap();
         workspace.apply_compaction(Compaction::Complete, 104);
         assert_eq!(workspace.tokens_observed_at_unix, Some(103), "duplicate completion must preserve newer post-compaction usage");
