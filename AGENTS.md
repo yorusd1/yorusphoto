@@ -18,6 +18,9 @@ applies. On top of it:
   commented hooks (`// yorusphoto:`).
 - **Merging upstream.** Merge PhotoCraft's latest release tag (`git fetch upstream --tags`), take upstream's
   side in shared files and re-attach the `// yorusphoto:` hooks; then run the gates below.
+- **GitHub automation is off.** Actions is disabled in the repository's settings (upstream's workflows
+  need storytold's shared actions and secrets) and `.github/dependabot.yml` is deleted; keep it deleted
+  when an upstream merge brings it back.
 - **Build inputs.** The interface translations come from craft-i18n at `craft-i18n.rev`, checked out in
   `.toolchain/craft-i18n` (`CRAFT_I18N_DIR`; required for releases, or the editor is English only). The
   all-language UI tests also need craft-fonts at CI's pinned commit (`CRAFT_FONTS_DIR`), as upstream's CI
