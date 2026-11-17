@@ -7,3 +7,12 @@ Make Flipbook Sheet…	Flipbook-lap készítése…
 Split Flipbook Sheet…	Flipbook-lap felosztása…
 Make Flipbook Sheet	Flipbook-lap készítése
 Split Flipbook Sheet	Flipbook-lap felosztása
+Preview Animation…	Animáció előnézete…
+Animation Preview	Animáció előnézete
+Select two or more frame layers or a flipbook sheet first.	Előbb jelöljön ki legalább két képkockaréteget vagy egy flipbook-lapot.
+GIF timing: {ms} ms per frame	GIF időzítés: {ms} ms képkockánként
+Frame {number} of {count}	Képkocka: {number} / {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	A Roblox flipbookjai legfeljebb 64 képkockát tartalmazhatnak (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	{columns} × {rows} méretű lap · {width} × {height} px
+Click a frame to show it.	Kattintson egy képkockára a megjelenítéséhez.
+Space plays and pauses · ← → step a frame	Szóköz: lejátszás és szünet · ← →: képkockánként

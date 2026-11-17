@@ -146,6 +146,7 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         fields.insert("codexWorkspace".into(), crate::codex_ui::workspace_inspect(app));
         fields.insert("yorusAi".into(), app.yorus_ai_runtime.inspect());
         fields.insert("yorusAiSettings".into(), json!(app.ui.yorus_ai));
+        fields.insert("animationPreview".into(), crate::animation_preview::inspect(app));
     }
     snapshot
 }

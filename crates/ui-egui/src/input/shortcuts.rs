@@ -676,6 +676,11 @@ fn handle_keys(app: &mut PhotocraftApp, ctx: &egui::Context) {
         return;
     }
     let focus = crate::shortcut_dispatch::Focus::of(ctx);
+    // yorusphoto: Space and the arrows play and step the Animation Preview under the pointer,
+    // before the arrows nudge a layer behind it.
+    if focus == crate::shortcut_dispatch::Focus::None && app.ui.dialogs.is_empty() {
+        crate::animation_preview::keys(app, ctx);
+    }
     if handle_modal_canvas_keys(app, ctx, focus) || handle_pen_and_work_path_keys(app, ctx, focus) || handle_object_tool_keys(app, ctx) {
         return;
     }

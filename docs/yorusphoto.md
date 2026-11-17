@@ -108,6 +108,17 @@ Tick **Animation (GIF)** in the Images tab and choose 2 to 16 frames to ask Code
 
 **Layer › Flipbook › Make Flipbook Sheet…** lays the selected frame layers (bottom to top) out left to right and top to bottom in a new document: fitted, square, or the smallest of Roblox's 2×2, 4×4 and 8×8 grids. **Split Flipbook Sheet…** cuts a sheet back into one layer per frame. Both open a new document and leave the source unchanged.
 
+### Animation Preview
+
+When Codex returns an animation, the **Animation Preview** window opens: the GIF plays on the left at its own speed, and on the right the flipbook sheet it makes is laid out in its grid. The frame on show is lit in the sheet and in the strip of every frame along the bottom, so you can see which cell each moment of the GIF lands in.
+
+- **Play and step:** click the player or press Space to play or pause; the buttons, or ← and →, step one frame. The slider sets the speed in frames per second (it starts at the GIF's own timing).
+- **Pick a frame:** click a cell of the sheet or a thumbnail in the strip.
+- **Grid:** Fit, Square or Roblox (2×2, 4×4 or 8×8) shows the sheet as **Make Flipbook Sheet** would make it, with its size in pixels; the window's **Make Flipbook Sheet** button makes it.
+- **Background:** a checkerboard, dark or light behind transparent pixels.
+
+**Layer › Flipbook › Preview Animation…** opens the window for any animation: the selected frame layers, the frames beside the active one, or a flipbook sheet (its grid read from its name, such as `flipbook 4x4`, and set with **Columns** and **Rows**), which **Split Flipbook Sheet** then cuts into frames. The preview follows edits: paint on a frame and it is drawn again.
+
 ## Ask Codex to edit
 
 Use the **Assistant** tab to describe an editing task. Codex can inspect the live editor and run the same engine commands used by the menus. Enable **Selected area** when the task should use a selection, and **GIF** to let it make animations. Choose **Stop** to cancel an active task.
@@ -182,6 +193,8 @@ Agents can also start Codex image generation without transferring image bytes ov
 ```
 
 Pass that object to `control_call`. Use `"mode": "canvas"` to generate a new independent image. Add `"animation": 8` for a looping GIF of 8 frames (one layer per frame; `"frames": "sheet"` lays a new canvas out as a flipbook sheet), `"transparent": true` for a cutout, and `"fit": "exact"` to scale a larger result into the selection instead of growing the canvas. Generation starts asynchronously; poll `ui_inspect` and read the Codex panel status until it finishes or reports an error. The built-in panel and external agents use the same capture and placement behavior.
+
+An animation that arrives opens the Animation Preview; `ui_inspect` reports it as `animationPreview` (its frames, the frame on show, playing or not, speed and grid). `layer.flipbook.preview` opens it from a script: `{}` previews what the active document holds, `{"layers": [ids]}` those frame layers, `{"sheet": {"layer": id, "columns": 4, "rows": 4}}` a sheet, and `"play": false` opens it paused.
 
 The lower-level `ai.capture`, `ai.apply`, and `ai.open` commands use base64 image payloads. Existing MCP/control transport limits remain **1 MiB per request** and **8 MiB per response**, so these inline commands are suitable only for small images over MCP. Use `ai.generate` to start the native generation workflow for larger images.
 

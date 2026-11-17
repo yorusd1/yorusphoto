@@ -7,3 +7,12 @@ Make Flipbook Sheet…	플립북 시트 만들기…
 Split Flipbook Sheet…	플립북 시트 나누기…
 Make Flipbook Sheet	플립북 시트 만들기
 Split Flipbook Sheet	플립북 시트 나누기
+Preview Animation…	애니메이션 미리 보기…
+Animation Preview	애니메이션 미리 보기
+Select two or more frame layers or a flipbook sheet first.	먼저 프레임 레이어를 두 개 이상 선택하거나 플립북 시트를 선택하세요.
+GIF timing: {ms} ms per frame	GIF 타이밍: 프레임당 {ms}ms
+Frame {number} of {count}	프레임 {number} / {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Roblox 플립북에는 최대 64프레임(8 × 8)까지 들어갑니다.
+{columns} × {rows} sheet · {width} × {height} px	{columns} × {rows} 시트 · {width} × {height} px
+Click a frame to show it.	프레임을 클릭하면 표시됩니다.
+Space plays and pauses · ← → step a frame	스페이스: 재생 및 일시 정지 · ← →: 한 프레임씩

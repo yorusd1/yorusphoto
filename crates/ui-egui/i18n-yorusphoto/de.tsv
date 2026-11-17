@@ -8,3 +8,12 @@ Make Flipbook Sheet…	Flipbook-Sheet erstellen…
 Split Flipbook Sheet…	Flipbook-Sheet aufteilen…
 Make Flipbook Sheet	Flipbook-Sheet erstellen
 Split Flipbook Sheet	Flipbook-Sheet aufteilen
+Preview Animation…	Animationsvorschau…
+Animation Preview	Animationsvorschau
+Select two or more frame layers or a flipbook sheet first.	Wählen Sie zuerst zwei oder mehr Frame-Ebenen oder ein Flipbook-Sheet aus.
+GIF timing: {ms} ms per frame	GIF-Timing: {ms} ms pro Frame
+Frame {number} of {count}	Frame {number} von {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Roblox-Flipbooks fassen höchstens 64 Frames (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Sheet mit {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Klicken Sie auf einen Frame, um ihn anzuzeigen.
+Space plays and pauses · ← → step a frame	Leertaste spielt ab und pausiert · ← → Frame für Frame

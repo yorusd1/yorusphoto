@@ -7,3 +7,12 @@ Make Flipbook Sheet…	Tạo trang flipbook…
 Split Flipbook Sheet…	Tách trang flipbook…
 Make Flipbook Sheet	Tạo trang flipbook
 Split Flipbook Sheet	Tách trang flipbook
+Preview Animation…	Xem trước hoạt ảnh…
+Animation Preview	Xem trước hoạt ảnh
+Select two or more frame layers or a flipbook sheet first.	Trước tiên hãy chọn từ hai lớp khung hình trở lên hoặc một trang flipbook.
+GIF timing: {ms} ms per frame	Thời gian GIF: {ms} ms mỗi khung hình
+Frame {number} of {count}	Khung hình {number} / {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Flipbook của Roblox chứa tối đa 64 khung hình (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Trang {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Nhấp vào một khung hình để hiển thị.
+Space plays and pauses · ← → step a frame	Phím cách: phát và tạm dừng · ← →: từng khung hình

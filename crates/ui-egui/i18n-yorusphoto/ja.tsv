@@ -7,3 +7,12 @@ Make Flipbook Sheet…	フリップブックシートを作成…
 Split Flipbook Sheet…	フリップブックシートを分割…
 Make Flipbook Sheet	フリップブックシートを作成
 Split Flipbook Sheet	フリップブックシートを分割
+Preview Animation…	アニメーションをプレビュー…
+Animation Preview	アニメーションのプレビュー
+Select two or more frame layers or a flipbook sheet first.	先に 2 つ以上のフレームレイヤーか、フリップブックシートを選択してください。
+GIF timing: {ms} ms per frame	GIF のタイミング: 1 フレーム {ms} ms
+Frame {number} of {count}	フレーム {number} / {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Roblox のフリップブックは最大 64 フレーム (8 × 8) です。
+{columns} × {rows} sheet · {width} × {height} px	{columns} × {rows} のシート · {width} × {height} px
+Click a frame to show it.	フレームをクリックすると表示します。
+Space plays and pauses · ← → step a frame	スペースで再生と一時停止 · ← → で 1 フレームずつ

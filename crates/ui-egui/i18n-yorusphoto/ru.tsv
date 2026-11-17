@@ -7,3 +7,12 @@ Make Flipbook Sheet…	Создать лист флипбука…
 Split Flipbook Sheet…	Разделить лист флипбука…
 Make Flipbook Sheet	Создать лист флипбука
 Split Flipbook Sheet	Разделить лист флипбука
+Preview Animation…	Просмотр анимации…
+Animation Preview	Просмотр анимации
+Select two or more frame layers or a flipbook sheet first.	Сначала выберите два или более слоя кадров или лист флипбука.
+GIF timing: {ms} ms per frame	Тайминг GIF: {ms} мс на кадр
+Frame {number} of {count}	Кадр {number} из {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Флипбуки Roblox вмещают до 64 кадров (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Лист {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Щёлкните кадр, чтобы показать его.
+Space plays and pauses · ← → step a frame	Пробел: воспроизведение и пауза · ← →: по кадру

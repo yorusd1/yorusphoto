@@ -7,3 +7,12 @@ Make Flipbook Sheet…	產生序列影格圖集…
 Split Flipbook Sheet…	拆分序列影格圖集…
 Make Flipbook Sheet	產生序列影格圖集
 Split Flipbook Sheet	拆分序列影格圖集
+Preview Animation…	預覽動畫…
+Animation Preview	動畫預覽
+Select two or more frame layers or a flipbook sheet first.	請先選取兩個以上的影格圖層，或一張序列影格圖集。
+GIF timing: {ms} ms per frame	GIF 時間：每個影格 {ms} 毫秒
+Frame {number} of {count}	第 {number} 個影格，共 {count} 個
+Roblox flipbooks hold up to 64 frames (8 × 8).	Roblox 序列影格最多 64 個影格（8 × 8）。
+{columns} × {rows} sheet · {width} × {height} px	{columns} × {rows} 圖集 · {width} × {height} px
+Click a frame to show it.	按一下影格即可顯示。
+Space plays and pauses · ← → step a frame	空白鍵播放與暫停 · ← → 逐格切換

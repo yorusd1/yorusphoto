@@ -28,6 +28,8 @@ macro_rules! tl {
 pub mod ai_sidebar;
 pub mod codex_ui;
 mod i18n_yorusphoto;
+// yorusphoto: the Animation Preview window (an animation playing beside its flipbook sheet).
+mod animation_preview;
 pub mod yorus_ai_ui;
 pub use codex_ui::{
     AgentCommand, CodexChatRequest, CodexEvent, CodexLoginEvent, CodexUpdateEvent, CodexUpdateRequest, CodexWorkspaceAction, CodexWorkspaceEvent,

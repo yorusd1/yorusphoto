@@ -65,6 +65,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
         "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
         // yorusphoto: the assistant panels and their workflows explain their own requirements.
         "window.codex" | "window.yorusai" | "ai.generate" | "codex.send" => true,
+        crate::animation_preview::COMMAND => app.session.active().is_some(),
         i if i.starts_with("yorusai.") || i.starts_with("yorusAi.") => true,
         i if i.starts_with("file.openRecent.") => true,
         i if i.starts_with(DOCUMENT_ITEM) => true,

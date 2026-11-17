@@ -8,3 +8,12 @@ Make Flipbook Sheet…	Créer une planche de flipbook…
 Split Flipbook Sheet…	Découper une planche de flipbook…
 Make Flipbook Sheet	Créer une planche de flipbook
 Split Flipbook Sheet	Découper une planche de flipbook
+Preview Animation…	Aperçu de l'animation…
+Animation Preview	Aperçu de l'animation
+Select two or more frame layers or a flipbook sheet first.	Sélectionner d'abord au moins deux calques d'image ou une planche de flipbook.
+GIF timing: {ms} ms per frame	Minutage du GIF : {ms} ms par image
+Frame {number} of {count}	Image {number} sur {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Les flipbooks Roblox contiennent au plus 64 images (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Planche de {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Cliquer sur une image pour l'afficher.
+Space plays and pauses · ← → step a frame	Espace : lecture et pause · ← → : image par image

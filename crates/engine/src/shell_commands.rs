@@ -18,6 +18,8 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("yorusai.layers", "Separate layers with YorusAi", &[], None),
     ("yorusai.inspect", "Inspect YorusAi settings", &[], None),
     ("yorusai.cancel", "Stop YorusAi operation", &[], None),
+    // The Animation Preview window: an animation playing beside its flipbook sheet.
+    ("layer.flipbook.preview", "Preview Animation…", &["Layer", "Flipbook"], None),
     ("layer.selectUnderCursor", "Select Layer Under Cursor", &[], None),
     ("ui.symmetryTransform", "Transform Symmetry", &[], None),
     // Right-click the options bar's tool icon (#2825); `tool.resetAll` asks first.

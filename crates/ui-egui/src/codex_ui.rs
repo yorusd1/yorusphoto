@@ -258,6 +258,8 @@ pub struct Runtime {
     animation_grid: Option<(u32, u32, u32)>,
     /// The workspace action running keeps a saved chat's Codex thread in step (`sync_thread`).
     thread_sync: bool,
+    /// The open Animation Preview window.
+    pub(crate) animation: Option<crate::animation_preview::Preview>,
 }
 
 impl Runtime {
@@ -381,6 +383,11 @@ fn receive_image(app: &mut PhotocraftApp, bytes: Vec<u8>) {
                 message.push_str(" Codex returned a still image: GIF output needs Codex 0.169 or later and may not be on for every account yet.");
             }
             status(app, message, false);
+            // An animation plays in the Animation Preview, beside the flipbook sheet it makes.
+            if frames > 1 {
+                let target = app.codex_runtime.placement.as_ref().and_then(|p| p.target.as_ref()).and_then(|t| t.get("document")).and_then(Value::as_u64);
+                crate::animation_preview::open_result(app, &value, target);
+            }
         }
         Err(e) => {
             app.codex_runtime.pending_image = Some(bytes);
@@ -1110,6 +1117,9 @@ pub(crate) fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
 }
 
 pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if let Some(result) = crate::animation_preview::menu(app, id, params) {
+        return Some(result);
+    }
     if let Some(result) = references::menu(app, id, params) {
         return Some(result);
     }
@@ -1246,6 +1256,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     app.codex_runtime.show_account = open;
     workspace_windows(app, ctx);
     updates::window(app, ctx);
+    crate::animation_preview::show(app, ctx);
 }
 
 /// The docked assistant body. Async work is polled independently of panel visibility.

@@ -7,3 +7,12 @@ Make Flipbook Sheet…	Utwórz arkusz flipbooka…
 Split Flipbook Sheet…	Podziel arkusz flipbooka…
 Make Flipbook Sheet	Utwórz arkusz flipbooka
 Split Flipbook Sheet	Podziel arkusz flipbooka
+Preview Animation…	Podgląd animacji…
+Animation Preview	Podgląd animacji
+Select two or more frame layers or a flipbook sheet first.	Najpierw zaznacz co najmniej dwie warstwy klatek lub arkusz flipbooka.
+GIF timing: {ms} ms per frame	Czas GIF: {ms} ms na klatkę
+Frame {number} of {count}	Klatka {number} z {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	Flipbooki Roblox mieszczą maksymalnie 64 klatki (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Arkusz {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Kliknij klatkę, aby ją wyświetlić.
+Space plays and pauses · ← → step a frame	Spacja odtwarza i wstrzymuje · ← → klatka po klatce

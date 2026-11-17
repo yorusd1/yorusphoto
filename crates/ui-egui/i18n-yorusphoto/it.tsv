@@ -8,3 +8,12 @@ Make Flipbook Sheet…	Crea foglio flipbook…
 Split Flipbook Sheet…	Dividi foglio flipbook…
 Make Flipbook Sheet	Crea foglio flipbook
 Split Flipbook Sheet	Dividi foglio flipbook
+Preview Animation…	Anteprima animazione…
+Animation Preview	Anteprima animazione
+Select two or more frame layers or a flipbook sheet first.	Selezionare prima due o più livelli di fotogramma o un foglio flipbook.
+GIF timing: {ms} ms per frame	Tempi della GIF: {ms} ms per fotogramma
+Frame {number} of {count}	Fotogramma {number} di {count}
+Roblox flipbooks hold up to 64 frames (8 × 8).	I flipbook di Roblox contengono al massimo 64 fotogrammi (8 × 8).
+{columns} × {rows} sheet · {width} × {height} px	Foglio {columns} × {rows} · {width} × {height} px
+Click a frame to show it.	Fare clic su un fotogramma per mostrarlo.
+Space plays and pauses · ← → step a frame	Spazio avvia e mette in pausa · ← → un fotogramma alla volta
