@@ -258,7 +258,7 @@ fn disabled_reason(app: &PhotocraftApp, operation: &str) -> Option<String> {
 /// Enablement describes the current panel defaults; parameters may choose another model or
 /// a fresh canvas. Credentials are deliberately absent from both metadata and parameters.
 pub fn command_specs(app: &PhotocraftApp) -> Vec<Value> {
-    let remix = r#"{"model":"nano-banana-2.1"|"ideogram-4-5-precise-edit"|"flux-3"|"seedream-5.5"?,"prompt":string?,"mode":"selection"|"canvas"?,"ratio":"auto"|"1:1"|"16:9"|"21:9"|"3:2"|"4:3"|"5:4"|"4:5"|"3:4"|"9:16"|"2:3"? (model-dependent),"resolution":string? (Nano:1K|2K|4K; Seedream:1K|1.5K|2K; FLUX:768sq|1k|1.5k|2k|4k),"quality":"low"|"medium"|"high"|"very_low"? (Ideogram),"background":"opaque"|"transparent"|"auto"? (Seedream 5.5 on BytePlus: transparent returns a PNG with alpha),"width":1..16384?,"height":1..16384?} Uses current prompt/options and additional reference images from the panel when omitted. Seedream 5.5 runs on BytePlus ModelArk (with only a Replicate key it falls back to Seedream 5.0 Pro, which Replicate hosts). Seedream prompts <=4000 characters; others <=64KiB. Selected-area mode captures visible merged pixels, original geometry and exact coverage before starting, then adds a separate layer there. Canvas mode uses only the prompt/additional references and opens an independent canvas at width/height (<=16777216 pixels). Ideogram requires selection mode and sends the selection's black-edit/white-preserve mask. Provider key must already be configured; requests bill that API account. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status and use yorusai.cancel to stop."#;
+    let remix = r#"{"model":"nano-banana-2.1"|"ideogram-4-5-precise-edit"|"flux-3"|"seedream-5.5"?,"prompt":string?,"mode":"selection"|"canvas"?,"ratio":"auto"|"1:1"|"16:9"|"21:9"|"3:2"|"4:3"|"5:4"|"4:5"|"3:4"|"9:16"|"2:3"? (model-dependent),"resolution":string? (Nano:1K|2K|4K; Seedream:1K|1.5K|2K; FLUX:768sq|1k|1.5k|2k|4k),"quality":"low"|"medium"|"high"|"very_low"? (Ideogram),"background":"opaque"|"transparent"|"auto"? (Seedream 5.5 on BytePlus: transparent returns a PNG with alpha),"width":1..16384?,"height":1..16384?,"fit":"grow"|"exact"? (selection mode, the panel's Grow canvas to fit: enlarge the whole canvas when the result has more pixels than the area, or resample the result into it)} Uses current prompt/options and additional reference images from the panel when omitted. Seedream 5.5 runs on BytePlus ModelArk (with only a Replicate key it falls back to Seedream 5.0 Pro, which Replicate hosts). Seedream prompts <=4000 characters; others <=64KiB. Selected-area mode captures visible merged pixels, original geometry and exact coverage before starting, then adds a separate layer there. Canvas mode uses only the prompt/additional references and opens an independent canvas at width/height (<=16777216 pixels). Ideogram requires selection mode and sends the selection's black-edit/white-preserve mask. Provider key must already be configured; requests bill that API account. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status and use yorusai.cancel to stop."#;
     let upscale = r#"{"scaleFactor":2..8?,"mode":"selection"|"canvas"?} Crystal Upscale via Replicate. Requires a nonempty selection and saved Replicate key. Captures the original visible merged rectangle and selection coverage. Selection mode adds a separate layer at the same position/size; explicit canvas mode opens a fresh canvas at captured width*factor by height*factor. Output must fit <=16777216 pixels. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status. Provider bills the configured API account."#;
     let layers = r#"{"prompt":string? (optional instructions, <=4000 characters),"resolution":"1K"|"1.5K"|"2K"?,"maxLayers":2..100? (images returned at most, base included; each is billed),"textLayers":bool? (read text layers' text and name them by it)} Layer Separation with Seedream 5.5 via BytePlus ModelArk. Requires an open image and configured BytePlus key. Uses the selected area and original selection coverage when present, otherwise the whole visible canvas. Downloads positioned transparent artifacts, preserves their z-order, and adds separate layers inside that saved original frame. Does not change source layers or a newer selection; closed/resized source retains results for explicit recovery. Returns immediately; poll ui.inspect.yorusAi.busy and ui.inspect.yorusAiSettings.status. Provider bills the configured API account."#;
     let run = format!(
@@ -769,6 +769,15 @@ fn configure(app: &mut PhotocraftApp, params: &Value, operation: &str) -> Result
         } else if new_canvas {
             return Err("Layer Separation uses the captured area of the original canvas.".into());
         }
+    }
+    if operation == "remix"
+        && let Some(value) = params.get("fit")
+    {
+        state.grow_document = match value.as_str() {
+            Some("grow") => true,
+            Some("exact") => false,
+            _ => return Err("fit must be grow or exact.".into()),
+        };
     }
     for (key, output) in [("width", &mut state.width), ("height", &mut state.height), ("scaleFactor", &mut state.scale_factor)] {
         if let Some(value) = params.get(key) {
@@ -1706,6 +1715,12 @@ mod tests {
         app.ui.yorus_ai.model = "ideogram-4-5-precise-edit".into();
         configure(&mut app, &json!({"mode":"canvas","scaleFactor":2}), "upscale").unwrap();
         assert!(app.ui.yorus_ai.upscale_new_canvas);
+        configure(&mut app, &json!({"model":"nano-banana-2.1","fit":"exact"}), "remix").unwrap();
+        assert!(!app.ui.yorus_ai.grow_document);
+        configure(&mut app, &json!({"fit":"grow"}), "remix").unwrap();
+        assert!(app.ui.yorus_ai.grow_document);
+        assert!(configure(&mut app, &json!({"fit":"stretch"}), "remix").is_err());
+        assert!(app.ui.yorus_ai.grow_document, "a refused request changes nothing");
     }
 
     #[test]

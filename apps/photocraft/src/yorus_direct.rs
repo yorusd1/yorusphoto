@@ -23,6 +23,11 @@ const MAX_LAYERS: usize = 100;
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const NANO: &str = "google/nano-banana-2.1";
 const NANO_FALLBACK: &str = "google/nano-banana-2";
+/// Replicate recommends data URLs only below 1 MB; Nano Banana's references are kept under it.
+const INLINE_BUDGET: usize = 1 << 20;
+/// A reference re-encoded to fit the budget starts at this longest side (Nano Banana reads it for
+/// content, not size: its output resolution is the request's own).
+const INLINE_MAX_SIDE: u32 = 2048;
 /// Replicate does not host Seedream 5.5 yet; with only a Replicate key, Seedream runs 5.0 Pro there.
 const SEEDREAM: &str = "bytedance/seedream-5-pro";
 const IDEOGRAM: &str = "ideogram-ai/ideogram-4-5-precise-edit";
@@ -230,11 +235,15 @@ impl Backend {
             progress(events, "Seedream 5.5 needs a BytePlus key; Replicate runs Seedream 5.0 Pro instead…");
         }
         let key = keys.require("replicate")?;
-        progress(events, "Uploading reference images to Replicate…");
+        // Replicate refuses Google's Nano Banana models a Files API link (HTTP 500, "An unexpected
+        // error ocurred", measured Nov 16 and 17, 2026, for 2.1 and 2) while the same image sent
+        // inline works; its other models here accept the links.
+        let inline = request.operation == "remix" && matches!(request.model.as_str(), "nano-banana-2.1" | "nano-banana-2");
+        progress(events, if inline { "Preparing reference images…" } else { "Uploading reference images to Replicate…" });
         let mut urls = Vec::new();
         for (index, bytes) in request.reference.iter().chain(request.references.iter()).enumerate() {
             check_cancel(&request.cancel)?;
-            urls.push(self.replicate_file(bytes, &format!("reference-{index}.png"), key)?);
+            urls.push(if inline { inline_reference(bytes)? } else { self.replicate_file(bytes, &format!("reference-{index}.png"), key)? });
         }
         let (model, input) = if request.operation == "upscale" {
             (CRYSTAL, json!({"image":urls.first().ok_or("Select an area to upscale first.")?,"scale_factor":request.scale_factor}))
@@ -519,6 +528,36 @@ fn image_type(bytes: &[u8]) -> Result<&'static str, String> {
 }
 fn data_url(bytes: &[u8]) -> Result<String, String> {
     Ok(format!("data:{};base64,{}", image_type(bytes)?, BASE64.encode(bytes)))
+}
+/// A reference as a data URL within [`INLINE_BUDGET`]: as captured when small enough, otherwise
+/// re-encoded (JPEG when fully opaque, PNG to keep transparency) and scaled down until it fits.
+fn inline_reference(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() <= INLINE_BUDGET {
+        return data_url(bytes);
+    }
+    let source = decode_bounded(bytes)?;
+    let (width, height) = (source.width(), source.height());
+    let rgba = image::RgbaImage::from_raw(width, height, source.to_rgba8()).ok_or("The reference image could not be prepared.")?;
+    let opaque = rgba.pixels().all(|pixel| pixel.0[3] == u8::MAX);
+    let mut side = INLINE_MAX_SIDE.min(width.max(height));
+    loop {
+        let scale = f64::from(side) / f64::from(width.max(height));
+        let (w, h) = (((f64::from(width) * scale).round() as u32).max(1), ((f64::from(height) * scale).round() as u32).max(1));
+        let sized = if (w, h) == (width, height) { rgba.clone() } else { image::imageops::resize(&rgba, w, h, image::imageops::FilterType::CatmullRom) };
+        let encoded = if opaque {
+            let rgb: Vec<u8> = sized.pixels().flat_map(|pixel| [pixel.0[0], pixel.0[1], pixel.0[2]]).collect();
+            let output = Image::from_u8(w, h, ChannelLayout::Rgb, rgb).map_err(|_| "The reference image could not be prepared.")?;
+            photocraft_codecs::encode(&output, Format::Jpeg, &EncodeOptions { jpeg_quality: 92, embed_metadata: false, ..Default::default() })
+        } else {
+            let output = Image::from_u8(w, h, ChannelLayout::Rgba, sized.into_raw()).map_err(|_| "The reference image could not be prepared.")?;
+            photocraft_codecs::encode(&output, Format::Png, &EncodeOptions { embed_metadata: false, ..Default::default() })
+        }
+        .map_err(|_| "The reference image could not be encoded.")?;
+        if encoded.len() <= INLINE_BUDGET || side <= 256 {
+            return data_url(&encoded);
+        }
+        side = side * 3 / 4;
+    }
 }
 fn image_part(bytes: &[u8], filename: &str) -> Result<multipart::Part, String> {
     multipart::Part::bytes(bytes.to_vec()).file_name(filename.to_owned()).mime_str(image_type(bytes)?).map_err(|_| "The image content type is invalid.".into())
@@ -929,11 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn replicate_upload_fallback_model_retry_poll_and_public_download_contract() {
+    fn nano_sends_references_inline_with_model_retry_poll_and_public_download_contract() {
         let png = fixture();
         let (backend, audit, server) = mock(|base| {
             vec![
-                Step { method: "POST", path: "/v1/files", status: 503, body: br#"{"detail":"upload unavailable"}"#.to_vec() },
                 step("POST", "/v1/models/google/nano-banana-2.1/predictions", json!({"id":"first","status":"failed","error":"model unavailable"})),
                 step("POST", "/v1/models/google/nano-banana-2/predictions", json!({"id":"fallback","status":"starting"})),
                 step("GET", "/v1/predictions/fallback", json!({"id":"fallback","status":"succeeded","output":[format!("{base}/result.png")]})),
@@ -946,13 +984,67 @@ mod tests {
         assert_eq!(output.first().expect("image").bytes, png);
         server.join().expect("mock server");
         let calls: Vec<_> = audit.try_iter().collect();
-        assert_eq!(calls.len(), 5);
-        let primary: Value = serde_json::from_slice(&calls.get(1).expect("prediction").body).expect("prediction JSON");
-        assert!(primary.pointer("/input/image_input/0").and_then(Value::as_str).expect("inline fallback").starts_with("data:image/png;base64,"));
-        assert_eq!(primary.pointer("/input/aspect_ratio"), Some(&json!("match_input_image")));
-        assert!(calls.get(1).expect("prediction").headers.to_lowercase().contains("prefer: wait=50"));
-        assert!(calls.get(4).expect("download").line.contains("/result.png"));
-        assert!(!calls.get(4).expect("download").headers.to_lowercase().contains("authorization"));
+        assert_eq!(calls.len(), 4, "no Files API upload for Nano Banana");
+        for prediction in [calls.first(), calls.get(1)] {
+            let body: Value = serde_json::from_slice(&prediction.expect("prediction").body).expect("prediction JSON");
+            assert_eq!(body.pointer("/input/image_input/0").and_then(Value::as_str), Some(data_url(&png).expect("data URL").as_str()));
+            assert_eq!(body.pointer("/input/aspect_ratio"), Some(&json!("match_input_image")));
+        }
+        assert!(calls.first().expect("prediction").headers.to_lowercase().contains("prefer: wait=50"));
+        assert!(calls.get(3).expect("download").line.contains("/result.png"));
+        assert!(!calls.get(3).expect("download").headers.to_lowercase().contains("authorization"));
+    }
+
+    #[test]
+    fn other_models_upload_references_and_fall_back_inline_when_uploads_fail() {
+        let png = fixture();
+        let (backend, audit, server) = mock(|base| {
+            vec![
+                Step { method: "POST", path: "/v1/files", status: 503, body: br#"{"detail":"upload unavailable"}"#.to_vec() },
+                step("POST", "/v1/models/black-forest-labs/flux-3-image/predictions", json!({"id":"flux","status":"succeeded","output":format!("{base}/result.png")})),
+                Step { method: "GET", path: "/result.png", status: 200, body: png.clone() },
+            ]
+        });
+        let mut request = request();
+        request.model = "flux-3".into();
+        let (events, _) = mpsc::channel();
+        assert_eq!(backend.generate(&request, &keys(), &events).expect("FLUX mock").len(), 1);
+        server.join().expect("mock server");
+        let calls: Vec<_> = audit.try_iter().collect();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.first().expect("upload").line.starts_with("POST /v1/files "));
+        let body: Value = serde_json::from_slice(&calls.get(1).expect("prediction").body).expect("prediction JSON");
+        assert!(body.pointer("/input/images/0").and_then(Value::as_str).expect("inline fallback").starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn big_inline_references_shrink_under_the_budget_keeping_transparency() {
+        let noise = |width: u32, height: u32, alpha: bool| {
+            let mut seed = 0x2545_f491_u32;
+            let pixels: Vec<u8> = (0..width * height)
+                .flat_map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let [r, g, b, a] = seed.to_le_bytes();
+                    [r, g, b, if alpha { a } else { u8::MAX }]
+                })
+                .collect();
+            let image = Image::from_u8(width, height, ChannelLayout::Rgba, pixels).expect("noise image");
+            photocraft_codecs::encode(&image, Format::Png, &EncodeOptions::default()).expect("noise PNG")
+        };
+        let small = fixture();
+        assert_eq!(inline_reference(&small).expect("small"), data_url(&small).expect("data URL"));
+        for (alpha, mime, format) in [(false, "data:image/jpeg;base64,", Format::Jpeg), (true, "data:image/png;base64,", Format::Png)] {
+            let big = noise(2400, 1350, alpha);
+            assert!(big.len() > INLINE_BUDGET);
+            let url = inline_reference(&big).expect("inline reference");
+            let encoded = BASE64.decode(url.strip_prefix(mime).expect("expected type")).expect("base64");
+            assert!(encoded.len() <= INLINE_BUDGET, "{} bytes", encoded.len());
+            assert_eq!(photocraft_codecs::detect(&encoded), Some(format));
+            let decoded = photocraft_codecs::decode(&encoded).expect("decodes");
+            assert!(decoded.width().max(decoded.height()) <= INLINE_MAX_SIDE);
+            assert!(decoded.height().abs_diff(decoded.width() * 1350 / 2400) <= 1, "keeps its shape");
+            assert_eq!(decoded.layout() == ChannelLayout::Rgba, alpha, "transparency kept only where it was");
+        }
     }
 
     #[test]
